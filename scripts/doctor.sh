@@ -31,7 +31,13 @@ else
   if docker image inspect "$CUDA_IMAGE" >/dev/null 2>&1 || docker pull "$CUDA_IMAGE"; then
     DIGEST="$(docker image inspect --format '{{index .RepoDigests 0}}' "$CUDA_IMAGE" 2>/dev/null || true)"
     pass "CUDA 镜像可用：${DIGEST:-$CUDA_IMAGE（本地镜像暂无 RepoDigest）}"
-    if GPU_INFO="$(docker run --rm --gpus device=0 --network none --read-only --cap-drop ALL --security-opt no-new-privileges "$CUDA_IMAGE" nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader 2>&1)"; then
+    CONTAINER_NVCC="$(docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --security-opt seccomp=builtin "$CUDA_IMAGE" nvcc --version 2>&1 | tail -1)"
+    if [ -n "$CONTAINER_NVCC" ]; then
+      pass "固定容器 NVCC：$CONTAINER_NVCC"
+    else
+      fail "固定 CUDA 容器内找不到 NVCC"
+    fi
+    if GPU_INFO="$(docker run --rm --gpus device=0 --network none --read-only --cap-drop ALL --security-opt no-new-privileges --security-opt seccomp=builtin "$CUDA_IMAGE" nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader 2>&1)"; then
       pass "CUDA 容器识别 GPU：$(printf '%s' "$GPU_INFO" | head -1)"
     else
       fail "CUDA 容器无法访问 GPU：$GPU_INFO"
@@ -56,21 +62,23 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
 #include <cuda_runtime.h>
 __global__ void ping(int* value) { *value = 42; }
 int main() {
-  int *device = nullptr, host = 0;
+  int *device = nullptr, host = 0, runtime_version = 0, driver_api_version = 0;
+  if (cudaRuntimeGetVersion(&runtime_version) != cudaSuccess) return 1;
+  if (cudaDriverGetVersion(&driver_api_version) != cudaSuccess) return 1;
   if (cudaMalloc(&device, sizeof(int)) != cudaSuccess) return 2;
   ping<<<1, 1>>>(device);
   if (cudaDeviceSynchronize() != cudaSuccess) return 3;
   if (cudaMemcpy(&host, device, sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) return 4;
   cudaFree(device);
-  std::printf("%d\\n", host);
+  std::printf("value=%d runtime=%d driver_api=%d\\n", host, runtime_version, driver_api_version);
   return host == 42 ? 0 : 5;
 }
 CUDA
   chmod 0777 "$TMP_DIR"
-  if docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 65534:65534 --tmpfs /tmp:rw,nosuid,nodev,size=64m --mount "type=bind,src=$TMP_DIR,dst=/work" "$CUDA_IMAGE" nvcc -arch=native /work/doctor.cu -o /work/doctor >/tmp/myleetgpu-doctor-compile.log 2>&1 \
-    && RESULT="$(docker run --rm --gpus device=0 --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 65534:65534 --tmpfs /tmp:rw,nosuid,nodev,size=64m --mount "type=bind,src=$TMP_DIR,dst=/work" "$CUDA_IMAGE" /work/doctor 2>&1)" \
-    && [ "$RESULT" = "42" ]; then
-    pass "最小 CUDA 程序在真实 GPU 上编译并运行"
+  if docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --security-opt seccomp=builtin --user 65534:65534 --tmpfs /tmp:rw,nosuid,nodev,size=64m --mount "type=bind,src=$TMP_DIR,dst=/work" "$CUDA_IMAGE" nvcc -arch=native /work/doctor.cu -o /work/doctor >/tmp/myleetgpu-doctor-compile.log 2>&1 \
+    && RESULT="$(docker run --rm --gpus device=0 --network none --read-only --cap-drop ALL --security-opt no-new-privileges --security-opt seccomp=builtin --user 65534:65534 --tmpfs /tmp:rw,nosuid,nodev,size=64m --mount "type=bind,src=$TMP_DIR,dst=/work,readonly" "$CUDA_IMAGE" /work/doctor 2>&1)" \
+    && [[ "$RESULT" == value=42\ runtime=* ]]; then
+    pass "最小 CUDA 程序在真实 GPU 上编译并运行：$RESULT"
   else
     fail "最小 CUDA 程序失败：$(tail -8 /tmp/myleetgpu-doctor-compile.log 2>/dev/null || true) ${RESULT:-}"
   fi
@@ -78,4 +86,3 @@ fi
 
 printf '\nDoctor summary: %d failure(s), %d warning(s)\n' "$FAILURES" "$WARNINGS"
 [ "$FAILURES" -eq 0 ]
-

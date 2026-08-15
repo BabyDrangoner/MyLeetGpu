@@ -30,4 +30,4 @@ exclude = ["alembic/versions"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
-
+ignore = ["RUF001", "RUF002", "RUF003"]
