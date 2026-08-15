@@ -6,7 +6,9 @@ x-backend: &backend
     dockerfile: infra/backend.Dockerfile
   image: myleetgpu/backend:local
   restart: unless-stopped
+  user: "${MYLEETGPU_HOST_UID:-1000}:${MYLEETGPU_HOST_GID:-1000}"
   environment:
+    HOME: /tmp
     MYLEETGPU_DATA_DIR: /data
     MYLEETGPU_PROBLEMS_DIR: /app/problems
     MYLEETGPU_HOST_DATA_DIR: ${MYLEETGPU_HOST_DATA_DIR:?run through make start}
@@ -16,6 +18,8 @@ x-backend: &backend
     MYLEETGPU_OUTPUT_LIMIT_BYTES: ${MYLEETGPU_OUTPUT_LIMIT_BYTES:-65536}
     MYLEETGPU_CONTAINER_MEMORY: ${MYLEETGPU_CONTAINER_MEMORY:-2g}
     MYLEETGPU_CONTAINER_CPUS: ${MYLEETGPU_CONTAINER_CPUS:-2}
+    # Only reachable on the private Compose network; no API port is published to the host.
+    MYLEETGPU_API_HOST: 0.0.0.0
   volumes:
     - ./data:/data
     - ./problems:/app/problems:ro
@@ -23,9 +27,17 @@ x-backend: &backend
     - internal
 
 services:
+  migrate:
+    <<: *backend
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
   api:
     <<: *backend
     command: ["python", "-m", "myleetgpu.api.main"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
       interval: 5s
@@ -38,13 +50,16 @@ services:
     <<: *backend
     command: ["python", "-m", "myleetgpu.worker"]
     restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     # Docker socket access makes this trusted platform component privileged.
     # Submitted code still runs in separate non-root containers without the socket.
-    user: root
+    group_add:
+      - "${MYLEETGPU_DOCKER_GID:-1000}"
     volumes:
       - ./data:/data
       - ./problems:/app/problems:ro
-      - ./infra:/app/infra:ro
       - /var/run/docker.sock:/var/run/docker.sock
 
   web:
