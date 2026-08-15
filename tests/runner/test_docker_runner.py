@@ -14,12 +14,14 @@ from myleetgpu.runner.docker import (
     CONTAINER_FILE_BYTES,
     CONTAINER_USER,
     RESULT_PREFIX,
+    RUNNER_LABEL,
     DockerRunner,
     _safe_name,
 )
 from myleetgpu.runner.models import (
     CommandResult,
     EnvironmentProbe,
+    RunnerUnavailable,
     RunnerUnhealthy,
 )
 
@@ -92,7 +94,11 @@ def test_container_arguments_enforce_the_sandbox_baseline(
     assert args[:2] == ["docker", "run"]
     assert "--rm" in args
     assert option_value(args, "--name") == "safe-name"
+    labels = [args[index + 1] for index, value in enumerate(args) if value == "--label"]
+    assert RUNNER_LABEL in labels
+    assert any(label.startswith("com.myleetgpu.installation=") for label in labels)
     assert option_value(args, "--network") == "none"
+    assert option_value(args, "--log-driver") == "none"
     assert "--read-only" in args
     assert option_value(args, "--user") == CONTAINER_USER
     assert "--cap-drop=ALL" in args
@@ -100,8 +106,11 @@ def test_container_arguments_enforce_the_sandbox_baseline(
     security_options = [
         args[index + 1] for index, value in enumerate(args) if value == "--security-opt"
     ]
-    assert security_options == ["no-new-privileges=true", "seccomp=builtin"]
-    assert option_value(args, "--pid") == "private"
+    assert security_options == ["no-new-privileges=true"]
+    # Omitting an explicit seccomp option keeps Docker's built-in default
+    # profile enabled while remaining compatible with older Docker CLIs.
+    assert "seccomp=unconfined" not in security_options
+    assert "--pid" not in args  # Docker's default PID namespace is private.
     assert option_value(args, "--ipc") == "private"
     assert option_value(args, "--pids-limit") == "128"
     assert option_value(args, "--memory") == settings.container_memory
@@ -145,9 +154,20 @@ def test_compile_container_never_receives_gpu_access(
     monkeypatch.setattr(runner, "probe_environment", lambda: healthy_probe(settings))
 
     def fake_run(
-        args: Sequence[str], name: str, *, timeout: float, limit: int | None = None
+        args: Sequence[str],
+        name: str,
+        *,
+        timeout: float,
+        limit: int | None = None,
+        platform_owned: bool = False,
     ) -> CommandResult:
-        captured.update(args=list(args), name=name, timeout=timeout, limit=limit)
+        captured.update(
+            args=list(args),
+            name=name,
+            timeout=timeout,
+            limit=limit,
+            platform_owned=platform_owned,
+        )
         (task_root / "compile-validator" / "program").write_bytes(b"executable")
         return CommandResult(tuple(args), 0, "", 0.1)
 
@@ -159,9 +179,10 @@ def test_compile_container_never_receives_gpu_access(
     assert result.succeeded
     assert isinstance(args, list)
     assert "--gpus" not in args
-    assert args[-10:] == [
-        settings.cuda_image,
+    assert args[-11:] == [
+        "--entrypoint",
         "nvcc",
+        settings.cuda_image,
         *vector_problem.compile_flags,
         "-arch=sm_89",
         "-I/work",
@@ -252,7 +273,13 @@ def test_execute_uses_gpu_and_parses_only_platform_result(
     assert result.parsed == payload
     assert isinstance(args, list)
     assert option_value(args, "--gpus") == "device=0"
-    assert args[-4:] == [settings.cuda_image, "/work/program", "--mode", "full"]
+    assert args[-5:] == [
+        "--entrypoint",
+        "/work/program",
+        settings.cuda_image,
+        "--mode",
+        "full",
+    ]
     assert captured["timeout"] == 12.5
 
 
@@ -286,7 +313,7 @@ def test_result_parser_requires_a_prefixed_json_object(
     assert DockerRunner._parse_result(output) == expected
 
 
-def test_result_parser_uses_last_platform_record() -> None:
+def test_result_parser_rejects_multiple_platform_records() -> None:
     output = "\n".join(
         [
             RESULT_PREFIX + '{"status":"failed"}',
@@ -295,7 +322,29 @@ def test_result_parser_uses_last_platform_record() -> None:
         ]
     )
 
-    assert DockerRunner._parse_result(output) == {"status": "passed", "total": 3}
+    assert DockerRunner._parse_result(output) is None
+
+
+def test_container_start_failure_is_classified_as_runner_unavailable(
+    runner: DockerRunner, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        runner,
+        "_run_limited",
+        lambda args, *, timeout, limit: CommandResult(
+            tuple(args), 125, "docker: Error response from daemon: runtime unavailable", 0.1
+        ),
+    )
+
+    with pytest.raises(RunnerUnavailable, match="container runtime failed"):
+        runner._run_container(
+            ["docker", "run"],
+            "failed-container",
+            timeout=1,
+            platform_owned=True,
+        )
+
+    assert (settings.data_dir / "runner-unhealthy.json").is_file()
 
 
 def test_diagnostics_remove_job_and_harness_paths(runner: DockerRunner, settings: Settings) -> None:
@@ -461,7 +510,7 @@ def test_mount_and_cleanup_refuse_symlink_that_escapes_job_spool(
     assert marker.read_text(encoding="utf-8") == "keep"
 
 
-def test_orphan_cleanup_removes_only_ids_returned_by_platform_name_filter(
+def test_orphan_cleanup_removes_only_ids_returned_by_runner_label_filter(
     runner: DockerRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[tuple[str, ...]] = []
@@ -483,7 +532,9 @@ def test_orphan_cleanup_removes_only_ids_returned_by_platform_name_filter(
             "ps",
             "-aq",
             "--filter",
-            "name=myleetgpu-",
+            f"label={RUNNER_LABEL}",
+            "--filter",
+            f"label={runner._installation_label}",
         ),
         ("docker", "rm", "-f", "abc123", "def456"),
     ]
@@ -501,7 +552,7 @@ def test_gpu_health_error_trips_persistent_circuit_breaker(
     monkeypatch.setattr(
         runner,
         "_run_container",
-        lambda args, name, *, timeout: CommandResult(
+        lambda args, name, *, timeout, limit=None, platform_owned=False: CommandResult(
             tuple(args), 1, "CUDA driver version is insufficient", 0.1
         ),
     )
@@ -510,8 +561,35 @@ def test_gpu_health_error_trips_persistent_circuit_breaker(
 
     assert not result.succeeded
     assert runner._health_file.is_file()
-    with pytest.raises(RunnerUnhealthy, match="CUDA driver version is insufficient"):
+    with pytest.raises(RunnerUnhealthy, match="trusted GPU probe failed"):
         runner.assert_healthy()
+
+
+def test_submitted_stdout_cannot_trip_the_runner_circuit_breaker(
+    runner: DockerRunner,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_root = settings.jobs_dir / "job-spoofed-health-error"
+    task_root.mkdir()
+    executable = task_root / "program"
+    executable.write_bytes(b"program")
+    calls = 0
+
+    def fake_container(args, name, *, timeout, limit=None, platform_owned=False):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return CommandResult(tuple(args), 1, "user says: Xid no cuda-capable device", 0.1)
+        return CommandResult(tuple(args), 0, "GPU 0: NVIDIA GeForce RTX 4060", 0.1)
+
+    monkeypatch.setattr(runner, "_run_container", fake_container)
+
+    result = runner.execute(task_root, executable, mode="public", timeout_seconds=1)
+
+    assert not result.succeeded
+    assert calls == 2
+    assert not runner._health_file.exists()
 
 
 def test_mark_unhealthy_bounds_persisted_reason(

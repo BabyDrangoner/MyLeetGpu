@@ -86,8 +86,9 @@ def test_real_compile_sandbox_has_no_gpu_device(real_runner: DockerRunner) -> No
     name = "myleetgpu-test-compile-no-gpu"
     command = [
         *real_runner._base_container_args(name, task_dir, gpu=False),
-        real_runner.settings.cuda_image,
+        "--entrypoint",
         "bash",
+        real_runner.settings.cuda_image,
         "-ceu",
         "test ! -e /dev/nvidiactl; test ! -e /dev/nvidia0; printf COMPILE_NO_GPU_OK",
     ]
@@ -128,7 +129,7 @@ def test_real_runner_compiles_and_fully_validates_each_builtin_problem(
         assert not result.output_limited
         assert result.parsed is not None
         assert result.parsed["status"] == "passed"
-        assert result.parsed["passed"] == result.parsed["total"]
+        assert result.parsed["summary"]["passed"] == result.parsed["summary"]["total"]
     finally:
         real_runner.cleanup_task(task_root)
 
@@ -192,8 +193,9 @@ printf SECURITY_OK
 """.strip()
     command = [
         *real_runner._base_container_args(name, run_dir, gpu=True),
-        real_runner.settings.cuda_image,
+        "--entrypoint",
         "bash",
+        real_runner.settings.cuda_image,
         "-ceu",
         checks,
     ]

@@ -29,6 +29,9 @@ RESULT_PREFIX = "MYLEETGPU_RESULT="
 CONTAINER_USER = "65534:65534"
 CONTAINER_WORKDIR = "/work"
 CONTAINER_FILE_BYTES = 64 * 1024 * 1024
+RUNNER_LABEL = "com.myleetgpu.runner=true"
+INSTALLATION_LABEL_KEY = "com.myleetgpu.installation"
+OWNER_LABEL_KEY = "com.myleetgpu.owner"
 
 
 def _safe_name(value: str) -> str:
@@ -43,6 +46,12 @@ class DockerRunner:
         self._cached_probe: tuple[float, EnvironmentProbe] | None = None
         self._health_file = settings.data_dir / "runner-unhealthy.json"
         self._docker = os.environ.get("MYLEETGPU_DOCKER_BIN", "docker")
+        installation = stable_hash(str(settings.resolved_host_data_dir.resolve()))[:16]
+        self._installation_label = f"{INSTALLATION_LABEL_KEY}={installation}"
+        self._owner_label: str | None = None
+
+    def assign_owner(self, owner: str) -> None:
+        self._owner_label = f"{OWNER_LABEL_KEY}={stable_hash(owner)[:16]}"
 
     def assert_healthy(self) -> None:
         if self._health_file.exists():
@@ -219,8 +228,9 @@ class DockerRunner:
         container_name = _safe_name(f"myleetgpu-{task_root.name}-compile-{harness_kind}")
         command = [
             *self._base_container_args(container_name, compile_dir, gpu=False),
-            self.settings.cuda_image,
+            "--entrypoint",
             "nvcc",
+            self.settings.cuda_image,
             *self.effective_compile_flags(problem, probe),
             "-I/work",
             "/work/source.cu",
@@ -232,7 +242,12 @@ class DockerRunner:
             self.settings.compile_timeout_seconds,
             problem.manifest.timeouts.compile_ms / 1000,
         )
-        result = self._run_container(command, container_name, timeout=timeout)
+        result = self._run_container(
+            command,
+            container_name,
+            timeout=timeout,
+            platform_owned=True,
+        )
         diagnostics = self._clean_diagnostics(result.output, compile_dir)
         executable = compile_dir / "program"
         succeeded = result.returncode == 0 and executable.is_file()
@@ -269,11 +284,13 @@ class DockerRunner:
         run_target.chmod(0o555)
         run_dir.chmod(0o555)
         container_name = _safe_name(f"myleetgpu-{task_root.name}-run-{mode}")
-        program_args = ["/work/program"]
+        program_args: list[str] = []
         if mode in {"public", "full"}:
             program_args.extend(["--mode", mode])
         command = [
             *self._base_container_args(container_name, run_dir, gpu=True),
+            "--entrypoint",
+            "/work/program",
             self.settings.cuda_image,
             *program_args,
         ]
@@ -284,7 +301,10 @@ class DockerRunner:
             result.returncode == 0 and parsed is not None and parsed.get("status") == "passed"
         )
         if result.returncode != 0 and self._looks_like_gpu_health_failure(output):
-            self.mark_unhealthy(output or "GPU execution failed")
+            trusted_probe = self._docker_probe(["nvidia-smi", "-L"], gpu=True, timeout=15)
+            if trusted_probe.returncode != 0:
+                reason = self._clean_output(trusted_probe.output) or "trusted GPU probe failed"
+                self.mark_unhealthy(f"trusted GPU probe failed after execution: {reason}")
         return ExecutionResult(
             succeeded=succeeded,
             output=output,
@@ -306,18 +326,21 @@ class DockerRunner:
     def cleanup_orphan_containers(self) -> list[str]:
         """Remove platform containers left behind by a terminated worker."""
 
+        return self._cleanup_containers([RUNNER_LABEL, self._installation_label])
+
+    def cleanup_owned_containers(self) -> list[str]:
+        """Stop only containers belonging to this Runner owner after lease loss."""
+
+        if self._owner_label is None:
+            return []
+        return self._cleanup_containers([RUNNER_LABEL, self._installation_label, self._owner_label])
+
+    def _cleanup_containers(self, labels: Sequence[str]) -> list[str]:
         try:
-            listed = self._run_limited(
-                [
-                    self._docker,
-                    "ps",
-                    "-aq",
-                    "--filter",
-                    "name=myleetgpu-",
-                ],
-                timeout=10,
-                limit=16_384,
-            )
+            command = [self._docker, "ps", "-aq"]
+            for label in labels:
+                command.extend(["--filter", f"label={label}"])
+            listed = self._run_limited(command, timeout=10, limit=16_384)
         except OSError:
             return []
         if listed.returncode != 0:
@@ -335,7 +358,13 @@ class DockerRunner:
             "--rm",
             "--name",
             name,
+            "--label",
+            RUNNER_LABEL,
+            "--label",
+            self._installation_label,
             "--network",
+            "none",
+            "--log-driver",
             "none",
             "--read-only",
             "--user",
@@ -343,10 +372,6 @@ class DockerRunner:
             "--cap-drop=ALL",
             "--security-opt",
             "no-new-privileges=true",
-            "--security-opt",
-            "seccomp=builtin",
-            "--pid",
-            "private",
             "--ipc",
             "private",
             "--pids-limit",
@@ -376,6 +401,11 @@ class DockerRunner:
             "--stop-timeout",
             "1",
         ]
+        if self._owner_label is not None:
+            args[args.index("--network") : args.index("--network")] = [
+                "--label",
+                self._owner_label,
+            ]
         if gpu:
             args.extend(["--gpus", "device=0"])
         return args
@@ -400,7 +430,13 @@ class DockerRunner:
             "--rm",
             "--name",
             name,
+            "--label",
+            RUNNER_LABEL,
+            "--label",
+            self._installation_label,
             "--network",
+            "none",
+            "--log-driver",
             "none",
             "--read-only",
             "--cap-drop=ALL",
@@ -411,10 +447,21 @@ class DockerRunner:
             "--memory",
             "512m",
         ]
+        if self._owner_label is not None:
+            args[args.index("--network") : args.index("--network")] = [
+                "--label",
+                self._owner_label,
+            ]
         if gpu:
             args.extend(["--gpus", "device=0"])
-        args.extend([self.settings.cuda_image, *command])
-        return self._run_container(args, name, timeout=timeout, limit=32_768)
+        args.extend(["--entrypoint", command[0], self.settings.cuda_image, *command[1:]])
+        return self._run_container(
+            args,
+            name,
+            timeout=timeout,
+            limit=32_768,
+            platform_owned=True,
+        )
 
     def _image_runtime_version(self) -> str | None:
         result = self._docker_probe(["cat", "/usr/local/cuda/version.json"], gpu=False, timeout=10)
@@ -452,7 +499,13 @@ class DockerRunner:
         }
 
     def _run_container(
-        self, args: Sequence[str], name: str, *, timeout: float, limit: int | None = None
+        self,
+        args: Sequence[str],
+        name: str,
+        *,
+        timeout: float,
+        limit: int | None = None,
+        platform_owned: bool = False,
     ) -> CommandResult:
         result = self._run_limited(
             args, timeout=timeout, limit=limit or self.settings.output_limit_bytes
@@ -465,6 +518,15 @@ class DockerRunner:
                 timeout=10,
                 check=False,
             )
+        if (
+            platform_owned
+            and result.returncode == 125
+            and not result.timed_out
+            and not result.output_limited
+        ):
+            reason = self._clean_output(result.output) or "Docker could not start the container"
+            self.mark_unhealthy(reason)
+            raise RunnerUnavailable(f"container runtime failed: {reason}")
         return result
 
     @staticmethod
@@ -477,7 +539,7 @@ class DockerRunner:
             stderr=subprocess.STDOUT,
             shell=False,
         )
-        chunks: queue.Queue[bytes | None] = queue.Queue()
+        chunks: queue.Queue[bytes | None] = queue.Queue(maxsize=16)
 
         def read_output() -> None:
             assert process.stdout is not None
@@ -518,10 +580,17 @@ class DockerRunner:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=5)
-        while not chunks.empty() and len(collected) < limit:
-            chunk = chunks.get_nowait()
-            if chunk:
+        drain_deadline = time.monotonic() + 2
+        while not reader_done and time.monotonic() < drain_deadline:
+            try:
+                chunk = chunks.get(timeout=0.02)
+            except queue.Empty:
+                continue
+            if chunk is None:
+                reader_done = True
+            elif len(collected) < limit:
                 collected.extend(chunk[: limit - len(collected)])
+        reader.join(timeout=0.2)
         suffix = b""
         if timed_out:
             suffix = b"\n[platform] process timed out"
@@ -559,14 +628,14 @@ class DockerRunner:
 
     @staticmethod
     def _parse_result(output: str) -> dict[str, Any] | None:
-        for line in reversed(output.splitlines()):
-            if line.startswith(RESULT_PREFIX):
-                try:
-                    parsed = json.loads(line.removeprefix(RESULT_PREFIX))
-                except json.JSONDecodeError:
-                    return None
-                return parsed if isinstance(parsed, dict) else None
-        return None
+        records = [line for line in output.splitlines() if line.startswith(RESULT_PREFIX)]
+        if len(records) != 1:
+            return None
+        try:
+            parsed = json.loads(records[0].removeprefix(RESULT_PREFIX))
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
     @staticmethod
     def _looks_like_gpu_health_failure(output: str) -> bool:

@@ -31,6 +31,15 @@ class FakeRunner:
         self.full_execution_factory: Callable[[int], ExecutionResult] | None = None
         self.full_calls = 0
         self.last_problem: Problem | None = None
+        self.owner: str | None = None
+        self.cleaned_owned_containers = False
+
+    def assign_owner(self, owner: str) -> None:
+        self.owner = owner
+
+    def cleanup_owned_containers(self) -> list[str]:
+        self.cleaned_owned_containers = True
+        return ["owned-container"]
 
     def compile(
         self,
@@ -156,6 +165,15 @@ def test_worker_reports_no_work_without_calling_runner(worker_bundle) -> None:
     assert runner.calls == []
 
 
+def test_lease_loss_stops_worker_and_owned_containers(worker_bundle) -> None:
+    _, _, _, runner, worker = worker_bundle
+
+    worker._handle_lease_loss("test lease loss")
+
+    assert worker.stopping.is_set()
+    assert runner.cleaned_owned_containers is True
+
+
 def test_save_version_validates_then_benchmarks_then_persists_atomically(
     worker_bundle,
 ) -> None:
@@ -249,8 +267,35 @@ def test_wrong_answer_stops_before_benchmark_and_creates_no_version(worker_bundl
     assert failed is not None
     assert failed.status == "failed"
     assert failed.error_json["code"] == "wrong_answer"  # type: ignore[index]
+    assert failed.diagnostics is None
+    assert "safe wrong-answer summary" not in str(failed.error_json)
     assert not any(call[:2] == ("compile", "benchmark") for call in runner.calls)
     assert repository.counts()["versions"] == 0
+
+
+def test_full_validation_does_not_return_untrusted_stdout(worker_bundle) -> None:
+    _, repository, service, runner, worker = worker_bundle
+    runner.execution_overrides["full"] = ExecutionResult(
+        True,
+        "sensitive internal input printed by submitted code",
+        {"status": "passed", "passed": 6, "total": 6},
+        0.02,
+        0,
+    )
+    submitted = service.submit(
+        problem_id="vector-addition",
+        action=JobAction.VALIDATE,
+        source=SOURCE,
+    )
+
+    worker.process_next()
+
+    completed = repository.get_job(submitted.id)
+    assert completed is not None
+    assert completed.status == "succeeded"
+    assert completed.result_json is not None
+    assert completed.result_json["output"] is None
+    assert "sensitive internal input" not in str(completed.result_json)
 
 
 @pytest.mark.parametrize(

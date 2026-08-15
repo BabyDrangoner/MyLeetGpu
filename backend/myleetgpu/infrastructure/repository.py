@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import Select, delete, func, or_, select, update
+from sqlalchemy import Select, delete, exists, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -18,6 +18,8 @@ from myleetgpu.infrastructure.models import (
     utc_now,
 )
 from myleetgpu.runner.models import EnvironmentProbe
+
+_UNSET = object()
 
 
 class Repository:
@@ -86,7 +88,7 @@ class Repository:
         progress: float | None = None,
         result: dict[str, Any] | None = None,
         error: dict[str, Any] | None = None,
-        diagnostics: str | None = None,
+        diagnostics: str | None | object = _UNSET,
     ) -> JobRecord:
         with self.session_factory.begin() as session:
             record = session.get(JobRecord, job_id)
@@ -102,8 +104,8 @@ class Repository:
                 record.result_json = result
             if error is not None:
                 record.error_json = error
-            if diagnostics is not None:
-                record.diagnostics = diagnostics
+            if diagnostics is not _UNSET:
+                record.diagnostics = diagnostics if isinstance(diagnostics, str) else None
             if status.terminal:
                 record.completed_at = utc_now()
                 record.progress = 1.0
@@ -191,17 +193,54 @@ class Repository:
                 is not None
             )
 
+    def owns_active_lease(self, resource: str, owner: str) -> bool:
+        now = utc_now()
+        with self.session_factory() as session:
+            return (
+                session.scalar(
+                    select(ResourceLeaseRecord.resource).where(
+                        ResourceLeaseRecord.resource == resource,
+                        ResourceLeaseRecord.owner == owner,
+                        ResourceLeaseRecord.expires_at > now,
+                    )
+                )
+                is not None
+            )
+
     def save_environment(
         self, probe: EnvironmentProbe, *, force_new: bool = False
     ) -> EnvironmentSnapshotRecord:
         with self.session_factory.begin() as session:
+            observed_at = utc_now()
             if not force_new:
                 existing = session.scalar(
                     select(EnvironmentSnapshotRecord)
-                    .where(EnvironmentSnapshotRecord.fingerprint == probe.fingerprint)
-                    .order_by(EnvironmentSnapshotRecord.created_at.desc())
+                    .where(
+                        EnvironmentSnapshotRecord.fingerprint == probe.fingerprint,
+                        ~exists().where(
+                            VersionRecord.environment_snapshot_id == EnvironmentSnapshotRecord.id
+                        ),
+                        ~exists().where(
+                            BenchmarkRunRecord.environment_snapshot_id
+                            == EnvironmentSnapshotRecord.id
+                        ),
+                    )
+                    .order_by(EnvironmentSnapshotRecord.observed_at.desc())
                 )
                 if existing:
+                    existing.healthy = probe.healthy
+                    existing.gpu_name = probe.gpu_name
+                    existing.compute_capability = probe.compute_capability
+                    existing.driver_version = probe.driver_version
+                    existing.cuda_runtime_version = probe.cuda_runtime_version
+                    existing.nvcc_version = probe.nvcc_version
+                    existing.cuda_image = probe.cuda_image
+                    existing.image_digest = probe.image_digest
+                    existing.cuda_arch = probe.cuda_arch
+                    existing.telemetry_json = probe.telemetry
+                    existing.error = probe.error
+                    existing.observed_at = observed_at
+                    session.flush()
                     return existing
             record = EnvironmentSnapshotRecord(
                 fingerprint=probe.fingerprint,
@@ -216,6 +255,7 @@ class Repository:
                 cuda_arch=probe.cuda_arch,
                 telemetry_json=probe.telemetry,
                 error=probe.error,
+                observed_at=observed_at,
             )
             session.add(record)
             session.flush()
@@ -225,7 +265,8 @@ class Repository:
         with self.session_factory() as session:
             return session.scalar(
                 select(EnvironmentSnapshotRecord).order_by(
-                    EnvironmentSnapshotRecord.created_at.desc()
+                    EnvironmentSnapshotRecord.observed_at.desc(),
+                    EnvironmentSnapshotRecord.created_at.desc(),
                 )
             )
 

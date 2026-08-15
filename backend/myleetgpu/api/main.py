@@ -375,7 +375,7 @@ def _environment_response(record: EnvironmentSnapshotRecord) -> dict[str, Any]:
         "cuda_arch": record.cuda_arch,
         "telemetry": {**_unavailable_telemetry(), **record.telemetry_json},
         "error": record.error,
-        "observed_at": record.created_at,
+        "observed_at": record.observed_at,
     }
 
 

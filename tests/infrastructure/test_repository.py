@@ -108,6 +108,8 @@ def test_single_gpu_lease_has_one_owner_and_can_be_released(repository: Reposito
     assert not repository.has_active_lease("gpu:0")
     assert repository.acquire_lease("gpu:0", "worker-a")
     assert repository.has_active_lease("gpu:0")
+    assert repository.owns_active_lease("gpu:0", "worker-a")
+    assert not repository.owns_active_lease("gpu:0", "worker-b")
     assert repository.acquire_lease("gpu:0", "worker-a")
     assert not repository.acquire_lease("gpu:0", "worker-b")
 
@@ -171,6 +173,20 @@ def test_environment_snapshot_is_deduplicated_by_fingerprint(repository: Reposit
 
     assert first.id == second.id
     assert repository.latest_environment().id == first.id  # type: ignore[union-attr]
+
+
+def test_environment_recovery_refreshes_latest_observation(repository: Repository) -> None:
+    initial_healthy = repository.save_environment(make_probe("healthy-fingerprint"))
+    unavailable = repository.save_environment(make_probe("unavailable-fingerprint", healthy=False))
+    recovered = repository.save_environment(make_probe("healthy-fingerprint"))
+
+    assert recovered.id == initial_healthy.id
+    assert recovered.observed_at > initial_healthy.created_at
+    assert unavailable.id != recovered.id
+    latest = repository.latest_environment()
+    assert latest is not None
+    assert latest.id == recovered.id
+    assert latest.healthy is True
 
 
 def test_benchmark_can_force_an_immutable_environment_snapshot_with_same_fingerprint(

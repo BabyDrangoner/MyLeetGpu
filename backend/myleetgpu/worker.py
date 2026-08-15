@@ -51,10 +51,13 @@ class Worker:
         self.stopping = threading.Event()
         self._lease_thread: threading.Thread | None = None
         self._last_environment_probe = 0.0
+        self._lease_required = False
+        self.runner.assign_owner(self.worker_id)
 
     def run_forever(self) -> None:
         if not self.repository.acquire_lease(GPU_RESOURCE, self.worker_id):
             raise RuntimeError("another worker holds the single-GPU lease")
+        self._lease_required = True
         self._lease_thread = threading.Thread(target=self._heartbeat, daemon=True)
         self._lease_thread.start()
         try:
@@ -76,6 +79,7 @@ class Worker:
             if self._lease_thread is not None:
                 self._lease_thread.join(timeout=6)
             self.repository.release_lease(GPU_RESOURCE, self.worker_id)
+            self._lease_required = False
 
     def process_next(self) -> bool:
         job = self.repository.claim_next_job(self.worker_id)
@@ -198,17 +202,19 @@ class Worker:
             diagnostics=validator.diagnostics,
         )
         timeout = self._execution_timeout(problem, mode)
+        self._assert_gpu_lease()
         validation = self.runner.execute(
             spool,
             validator.executable,
             mode=mode,
             timeout_seconds=timeout,  # type: ignore[arg-type]
         )
-        self._require_execution(validation, mode)
+        safe_correctness = self._safe_correctness(problem, mode, validation.parsed)
+        self._require_execution(validation, mode, safe_correctness)
         if action in {JobAction.RUN, JobAction.VALIDATE}:
             return {
-                "correctness": validation.parsed,
-                "output": validation.output,
+                "correctness": safe_correctness,
+                "output": validation.output if mode == "public" else None,
                 "compile_diagnostics": validator.diagnostics,
             }
 
@@ -256,7 +262,7 @@ class Worker:
         )
         return {
             "version_id": version.id,
-            "correctness": validation.parsed,
+            "correctness": safe_correctness,
             "benchmark": {"measurements": measurements},
         }
 
@@ -302,13 +308,18 @@ class Worker:
                 version_root, problem, source_path, harness_kind="validator"
             )
             self._require_compile(validator)
+            self._assert_gpu_lease()
             validation = self.runner.execute(
                 version_root,
                 validator.executable,  # type: ignore[arg-type]
                 mode="full",
                 timeout_seconds=self._execution_timeout(problem, "full"),
             )
-            self._require_execution(validation, "full")
+            self._require_execution(
+                validation,
+                "full",
+                self._safe_correctness(problem, "full", validation.parsed),
+            )
             prepared.append((version, version_root, source_path))
             self.repository.transition_job(
                 job.id,
@@ -354,6 +365,7 @@ class Worker:
     def _run_benchmark(self, spool: Path, problem: Problem, source_path: Path) -> ExecutionResult:
         compiled = self.runner.compile(spool, problem, source_path, harness_kind="benchmark")
         self._require_compile(compiled)
+        self._assert_gpu_lease()
         result = self.runner.execute(
             spool,
             compiled.executable,  # type: ignore[arg-type]
@@ -403,7 +415,11 @@ class Worker:
         raise JobFailed(JobError(code=code, message=message, stage="compiling"), result.diagnostics)
 
     @staticmethod
-    def _require_execution(result: ExecutionResult, stage: str) -> None:
+    def _require_execution(
+        result: ExecutionResult,
+        stage: str,
+        safe_correctness: dict[str, Any] | None = None,
+    ) -> None:
         if result.succeeded:
             return
         if result.timed_out:
@@ -419,16 +435,83 @@ class Worker:
                 code=ErrorCode.WRONG_ANSWER,
                 message="结果与参考实现不一致",
                 stage=stage,
-                details={"correctness": result.parsed},
+                details={"correctness": safe_correctness or {"status": "wrong_answer"}},
             )
         else:
             error = JobError(
                 code=ErrorCode.RUNTIME_ERROR,
                 message=f"{stage} 运行失败",
                 stage=stage,
-                details={"returncode": result.returncode, "result": result.parsed},
+                details={
+                    "returncode": result.returncode,
+                    "result": safe_correctness or {"status": result.parsed.get("status")}
+                    if result.parsed
+                    else None,
+                },
             )
-        raise JobFailed(error, result.output)
+        diagnostics = result.output if stage == "public" else None
+        raise JobFailed(error, diagnostics)
+
+    @staticmethod
+    def _safe_correctness(
+        problem: Problem,
+        mode: str,
+        parsed: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if parsed is None:
+            return None
+        if mode == "public":
+            return parsed
+
+        allowed_statuses = {"passed", "wrong_answer", "runtime_error"}
+        status = str(parsed.get("status", "runtime_error"))
+        if status not in allowed_statuses:
+            status = "runtime_error"
+        raw_cases = parsed.get("cases")
+        safe_cases: list[dict[str, Any]] = []
+        public_cases = problem.manifest.public.cases
+        if isinstance(raw_cases, list):
+            for index, raw_case in enumerate(raw_cases):
+                if not isinstance(raw_case, dict):
+                    continue
+                is_public = index < len(public_cases)
+                name = (
+                    str(public_cases[index].get("name", f"sample_{index + 1}"))
+                    if is_public
+                    else f"internal_case_{index - len(public_cases) + 1}"
+                )
+                passed = raw_case.get("passed") is True
+                safe_case: dict[str, Any] = {
+                    "name": name,
+                    "scope": "public" if is_public else "internal",
+                    "passed": passed,
+                }
+                if not passed:
+                    safe_case["message"] = "用例未通过"
+                safe_cases.append(safe_case)
+
+        if safe_cases:
+            passed_count = sum(item["passed"] is True for item in safe_cases)
+            summary = {
+                "total": len(safe_cases),
+                "passed": passed_count,
+                "failed": len(safe_cases) - passed_count,
+            }
+        else:
+            raw_summary = parsed.get("summary")
+            source = raw_summary if isinstance(raw_summary, dict) else parsed
+            total = source.get("total", 0)
+            passed_count = source.get("passed", 0)
+            total = total if isinstance(total, int) and total >= 0 else 0
+            passed_count = (
+                passed_count if isinstance(passed_count, int) and 0 <= passed_count <= total else 0
+            )
+            summary = {
+                "total": total,
+                "passed": passed_count,
+                "failed": total - passed_count,
+            }
+        return {"status": status, "cases": safe_cases, "summary": summary}
 
     @staticmethod
     def _normalize_measurements(
@@ -519,11 +602,34 @@ class Worker:
         while not self.stopping.wait(5):
             try:
                 if not self.repository.acquire_lease(GPU_RESOURCE, self.worker_id):
-                    LOGGER.critical("single-GPU lease was lost")
-                    self.stopping.set()
+                    self._handle_lease_loss("single-GPU lease was lost")
                     return
             except Exception:
                 LOGGER.exception("failed to renew the single-GPU lease")
+                self._handle_lease_loss("single-GPU lease renewal failed")
+                return
+
+    def _assert_gpu_lease(self) -> None:
+        if not self._lease_required:
+            return
+        try:
+            owned = self.repository.owns_active_lease(GPU_RESOURCE, self.worker_id)
+        except Exception as error:
+            self._handle_lease_loss("single-GPU lease check failed")
+            raise RunnerFailure("single-GPU lease check failed") from error
+        if not owned:
+            self._handle_lease_loss("single-GPU lease was lost")
+            raise RunnerFailure("single-GPU lease was lost")
+
+    def _handle_lease_loss(self, reason: str) -> None:
+        LOGGER.critical(reason)
+        self.stopping.set()
+        try:
+            removed = self.runner.cleanup_owned_containers()
+            if removed:
+                LOGGER.warning("stopped %d containers after lease loss", len(removed))
+        except Exception:
+            LOGGER.exception("failed to stop containers after lease loss")
 
     def _probe_and_record_environment(self) -> EnvironmentProbe:
         probe = self.runner.probe_environment(
