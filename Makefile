@@ -13,7 +13,7 @@ MYLEETGPU_HOST_GID ?= $(shell id -g)
 MYLEETGPU_DOCKER_GID ?= $(shell stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 0)
 export MYLEETGPU_HOST_DATA_DIR MYLEETGPU_HOST_UID MYLEETGPU_HOST_GID MYLEETGPU_DOCKER_GID
 
-.PHONY: help install doctor start stop logs lint test test-gpu e2e clean-jobs recover-runner migrate
+.PHONY: help install doctor start stop ps logs lint test test-gpu e2e clean-jobs recover-runner migrate
 
 help:
 	@echo "MyLeetGpu commands:"
@@ -21,6 +21,7 @@ help:
 	@echo "  make doctor      Inspect WSL2, Docker, NVIDIA and CUDA end to end"
 	@echo "  make start       Start web, API and the single GPU worker"
 	@echo "  make stop        Stop services"
+	@echo "  make ps          Show service status"
 	@echo "  make lint        Run backend and frontend static checks"
 	@echo "  make test        Run all non-GPU tests"
 	@echo "  make test-gpu    Run opt-in real NVIDIA GPU acceptance tests"
@@ -46,6 +47,9 @@ start:
 
 stop:
 	docker compose down --remove-orphans
+
+ps:
+	docker compose ps -a
 
 logs:
 	docker compose logs -f --tail=200

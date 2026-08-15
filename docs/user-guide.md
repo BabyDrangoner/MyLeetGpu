@@ -152,11 +152,11 @@ Get-NetTCPConnection -LocalPort 3000 -State Listen
 ### 4.2 日志与状态
 
 ```bash
-MYLEETGPU_HOST_DATA_DIR="$PWD/data" docker compose ps -a
+make ps
 make logs
 ```
 
-`migrate` 显示 `Exited (0)` 是一次性服务正常完成，不是崩溃；非零退出时执行 `MYLEETGPU_HOST_DATA_DIR="$PWD/data" docker compose logs migrate`，API/Worker 会保持未启动。Makefile 会导出绝对 host data 路径；直接调用 Compose 时必须像上面一样提供它。
+`migrate` 显示 `Exited (0)` 是一次性服务正常完成，不是崩溃；非零退出时执行 `make logs` 查看 Alembic 错误，API/Worker 会保持未启动。Makefile 会动态导出绝对 host data 路径、当前 UID/GID 与 Docker socket GID；不要绕过 Makefile 用 `.env.example` 中的示例 GID 直接启动 Compose。
 
 报告问题时保留页面显示的 Job ID。不要公开粘贴未经检查的完整数据库、`.env` 或用户源码。
 
@@ -400,7 +400,7 @@ MVP 只面向本机可信用户。提交代码与平台 harness 当前位于同�
 单 GPU 串行执行时，前方有运行/验证/benchmark 属正常现象。检查环境状态页、`/api/ready` 和：
 
 ```bash
-MYLEETGPU_HOST_DATA_DIR="$PWD/data" docker compose ps -a
+make ps
 make logs
 ```
 
@@ -424,7 +424,7 @@ Runner 在提交输出中发现 GPU 丢失、驱动不兼容、NVML 初始化失
 
 ### 11.11 migrate 非零退出
 
-`migrate` 是一次性服务，`Exited (0)` 正常；非零退出会阻止 API 和 Worker 启动。先执行 `MYLEETGPU_HOST_DATA_DIR="$PWD/data" docker compose logs migrate` 查看 Alembic 错误，停止服务并备份整个 `data/`，再修复权限、磁盘空间或 migration 问题。宿主开发环境安装依赖后可运行 `make migrate`；不要删除数据库让启动“看起来成功”，也不要跳过失败 revision。
+`migrate` 是一次性服务，`Exited (0)` 正常；非零退出会阻止 API 和 Worker 启动。先执行 `make logs` 查看 Alembic 错误，停止服务并备份整个 `data/`，再修复权限、磁盘空间或 migration 问题。宿主开发环境安装依赖后可运行 `make migrate`；不要删除数据库让启动“看起来成功”，也不要跳过失败 revision。
 
 ### 11.12 SQLite busy、磁盘满或数据库损坏
 
