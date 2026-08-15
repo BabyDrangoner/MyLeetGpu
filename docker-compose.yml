@@ -1,0 +1,66 @@
+name: myleetgpu
+
+x-backend: &backend
+  build:
+    context: .
+    dockerfile: infra/backend.Dockerfile
+  image: myleetgpu/backend:local
+  restart: unless-stopped
+  environment:
+    MYLEETGPU_DATA_DIR: /data
+    MYLEETGPU_PROBLEMS_DIR: /app/problems
+    MYLEETGPU_HOST_DATA_DIR: ${MYLEETGPU_HOST_DATA_DIR:?run through make start}
+    MYLEETGPU_CUDA_IMAGE: ${CUDA_IMAGE:-nvidia/cuda:12.4.1-devel-ubuntu22.04}
+    MYLEETGPU_CUDA_ARCH: ${MYLEETGPU_CUDA_ARCH:-auto}
+    MYLEETGPU_LOG_LEVEL: ${MYLEETGPU_LOG_LEVEL:-INFO}
+    MYLEETGPU_OUTPUT_LIMIT_BYTES: ${MYLEETGPU_OUTPUT_LIMIT_BYTES:-65536}
+    MYLEETGPU_CONTAINER_MEMORY: ${MYLEETGPU_CONTAINER_MEMORY:-2g}
+    MYLEETGPU_CONTAINER_CPUS: ${MYLEETGPU_CONTAINER_CPUS:-2}
+  volumes:
+    - ./data:/data
+    - ./problems:/app/problems:ro
+  networks:
+    - internal
+
+services:
+  api:
+    <<: *backend
+    command: ["python", "-m", "myleetgpu.api.main"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    expose:
+      - "8000"
+
+  worker:
+    <<: *backend
+    command: ["python", "-m", "myleetgpu.worker"]
+    restart: unless-stopped
+    # Docker socket access makes this trusted platform component privileged.
+    # Submitted code still runs in separate non-root containers without the socket.
+    user: root
+    volumes:
+      - ./data:/data
+      - ./problems:/app/problems:ro
+      - ./infra:/app/infra:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  web:
+    build:
+      context: apps/web
+      dockerfile: Dockerfile
+    image: myleetgpu/web:local
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:8080"
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge

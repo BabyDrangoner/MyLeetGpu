@@ -1,0 +1,12 @@
+alembic
+fastapi
+httpx
+pydantic
+pydantic-settings
+pytest
+pytest-cov
+PyYAML
+ruff
+SQLAlchemy
+uvicorn
+
