@@ -16,6 +16,7 @@ from myleetgpu.config import Settings, get_settings
 from myleetgpu.domain.benchmark import Measurement, source_hash
 from myleetgpu.domain.jobs import GPU_RESOURCE, ErrorCode, JobAction, JobError, JobStatus
 from myleetgpu.domain.problems import Problem, ProblemCatalog
+from myleetgpu.filesystem import ensure_mode
 from myleetgpu.infrastructure.database import Base, build_engine, build_session_factory
 from myleetgpu.infrastructure.logging import configure_logging
 from myleetgpu.infrastructure.models import JobRecord, VersionRecord
@@ -303,7 +304,7 @@ class Worker:
             version_root.mkdir(mode=0o700)
             source_path = version_root / "source.cu"
             source_path.write_text(version.source_code, encoding="utf-8", newline="\n")
-            source_path.chmod(0o600)
+            ensure_mode(source_path, 0o600)
             validator = self.runner.compile(
                 version_root, problem, source_path, harness_kind="validator"
             )

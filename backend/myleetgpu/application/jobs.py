@@ -10,6 +10,7 @@ from myleetgpu.config import Settings
 from myleetgpu.domain.benchmark import source_hash
 from myleetgpu.domain.jobs import JobAction, JobStatus
 from myleetgpu.domain.problems import ProblemCatalog
+from myleetgpu.filesystem import ensure_mode
 from myleetgpu.infrastructure.models import JobRecord
 from myleetgpu.infrastructure.repository import Repository
 
@@ -156,7 +157,7 @@ class JobService:
                 handle.flush()
                 os.fsync(handle.fileno())
             temporary.replace(path)
-            path.chmod(0o600)
+            ensure_mode(path, 0o600)
         except BaseException:
             temporary.unlink(missing_ok=True)
             raise

@@ -281,6 +281,11 @@ def test_execute_uses_gpu_and_parses_only_platform_result(
         "full",
     ]
     assert captured["timeout"] == 12.5
+    run_dir = task_root / "run-full"
+    assert stat.S_IMODE(run_dir.stat().st_mode) == 0o755
+    assert stat.S_IMODE((run_dir / "program").stat().st_mode) == 0o555
+    runner.cleanup_task(task_root)
+    assert not task_root.exists()
 
 
 def test_execute_rejects_unknown_mode_before_touching_task_directory(

@@ -16,6 +16,7 @@ from typing import Any
 from myleetgpu.config import Settings
 from myleetgpu.domain.benchmark import stable_hash
 from myleetgpu.domain.problems import Problem
+from myleetgpu.filesystem import ensure_mode
 from myleetgpu.runner.models import (
     CommandResult,
     CompileResult,
@@ -209,8 +210,8 @@ class DockerRunner:
             harness_target,
         )
         for path in (source_target, header_target, harness_target):
-            path.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
-        compile_dir.chmod(0o777)
+            ensure_mode(path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+        ensure_mode(compile_dir, 0o777)
         return compile_dir
 
     def compile(
@@ -281,8 +282,11 @@ class DockerRunner:
         run_dir.mkdir(parents=True, exist_ok=False)
         run_target = run_dir / "program"
         shutil.copyfile(executable, run_target)
-        run_target.chmod(0o555)
-        run_dir.chmod(0o555)
+        ensure_mode(run_target, 0o555)
+        # The bind mount is already readonly inside the submitted-code
+        # container. Keep the host owner write bit so a non-root Worker can
+        # unlink the executable when the job spool is cleaned.
+        ensure_mode(run_dir, 0o755)
         container_name = _safe_name(f"myleetgpu-{task_root.name}-run-{mode}")
         program_args: list[str] = []
         if mode in {"public", "full"}:
