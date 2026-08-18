@@ -2,10 +2,11 @@
 
 ## 1. 使用前必读
 
-MyLeetGpu 是供**本机可信用户**使用的 CUDA C++ 练习与性能比较工具。它会用容器限制提交代码的文件、网络和进程权限，但 Docker 和 RTX 4060 等消费级 GPU 无法提供面向公网不可信租户的强 GPU/显存隔离。
+MyLeetGpu 是供**单机可信操作者**使用的 CUDA C++ 练习与性能比较工具。它会用容器限制提交代码的文件、网络和进程权限，但 Docker 和 RTX 4060 等消费级 GPU 无法提供面向公网不可信租户的强 GPU/显存隔离。
 
-- 只通过 `http://localhost:3000` 或 `http://127.0.0.1:3000` 访问。
-- 不要增加 host 端口映射，不要把 `3000` 改为 `0.0.0.0:3000`，也不要使用端口转发、反向代理、公网隧道或路由器映射。
+- 默认只通过 `http://localhost:3000` 或 `http://127.0.0.1:3000` 访问。
+- 只有受信任的家庭/实验室局域网才可使用第 4.2 节的认证 LAN overlay；不要手改成 `0.0.0.0:3000`。
+- 不要使用公网隧道、路由器端口转发、公共 Wi-Fi 或把 LAN 地址发布到公网。
 - 不要让不可信的远程用户提交代码。
 - 不要给用户容器挂载 Docker socket、仓库、数据库或任意宽泛主机目录。
 
@@ -99,7 +100,7 @@ make doctor
 make install
 ```
 
-不要把 `.env` 提交到 Git。不要修改 Compose 的 `127.0.0.1:3000:8080` 发布规则或给 API 添加 `ports`。`MYLEETGPU_API_HOST=0.0.0.0` 只在 Compose 后端容器中设置，用于容器间通信；直接启动 API 的默认值仍为 `127.0.0.1`。
+不要把 `.env` 提交到 Git。不要修改基础 Compose 的 `127.0.0.1:3000:8080` 发布规则或给 API 添加 `ports`；需要 LAN 时只使用仓库提供的 `docker-compose.lan.yml`。`MYLEETGPU_API_HOST=0.0.0.0` 只在 Compose 后端容器中设置，用于容器间通信；直接启动 API 的默认值仍为 `127.0.0.1`。
 
 `make doctor` 应依次检查并实际报告：
 
@@ -143,13 +144,54 @@ curl --fail http://127.0.0.1:3000/api/ready
 ss -ltnp | grep ':3000'
 ```
 
-宿主应只看到 `127.0.0.1:3000`，不能是 `0.0.0.0:3000` 或 `[::]:3000`，也不应看到发布的 `8000`。API 容器内部监听 `0.0.0.0:8000` 属预期行为。也可在 Windows PowerShell 执行：
+默认模式下宿主应只看到 `127.0.0.1:3000`，不能是 `0.0.0.0:3000` 或 `[::]:3000`，也不应看到发布的 `8000`。LAN overlay 启用后会额外出现一个具体的局域网 IPv4，仍不得出现通配地址。API 容器内部监听 `0.0.0.0:8000` 属预期行为。也可在 Windows PowerShell 执行：
 
 ```powershell
 Get-NetTCPConnection -LocalPort 3000 -State Listen
 ```
 
-### 4.2 日志与状态
+### 4.2 可选的认证局域网模式
+
+本模式依赖 Windows 11/WSL 的 mirrored networking，和已有的 WSL SSH 局域网监听使用同一网络路径。它不会发布 API 8000，而是在当前明确的 LAN IPv4 上额外发布 Nginx 3000，并用 Basic Auth 同时保护页面和 `/api`。默认 `make start` 完全不受影响。
+
+先确认 `%USERPROFILE%\.wslconfig` 包含以下配置，修改后需要执行 `wsl --shutdown`：
+
+```ini
+[wsl2]
+networkingMode=mirrored
+firewall=true
+```
+
+在**提升权限的 Windows Terminal/PowerShell 所启动的 WSL 终端**中创建精确防火墙规则：
+
+```bash
+make lan-firewall
+```
+
+该命令同时创建 Windows 与 WSL Hyper-V 入站规则，只允许 `LocalSubnet` 访问检测出的具体 LAN IPv4 的 TCP 3000；它不会把 Hyper-V 默认入站策略改为 Allow。随后启动：
+
+```bash
+make start-lan
+```
+
+首次启动若没有 `data/lan.htpasswd`，会生成高强度随机密码并**只显示这一次**。默认用户名是 `myleetgpu`。记下终端打印的地址和密码，例如：
+
+```text
+http://192.168.31.106:3000
+```
+
+检查状态、轮换凭据和完整关闭：
+
+```bash
+make lan-status
+make lan-password
+make stop-lan
+make lan-firewall-off   # 需要提升权限
+```
+
+LAN IP 由 DHCP 改变后，应先关闭旧规则，再以新地址重新执行 `make lan-firewall` 和 `make start-lan`。Basic Auth 在纯 HTTP 上不提供传输加密，因此本模式只适用于受信任且加密的家庭/实验室网络；对不可信网络应使用带身份认证和端到端加密的 VPN，而不是扩大此端口。LAN 访问者共享同一草稿、版本、Job 队列和 GPU，无法相互隔离。
+
+### 4.3 日志与状态
 
 ```bash
 make ps
@@ -160,7 +202,7 @@ make logs
 
 报告问题时保留页面显示的 Job ID。不要公开粘贴未经检查的完整数据库、`.env` 或用户源码。
 
-### 4.3 停止
+### 4.4 停止
 
 ```bash
 make stop
@@ -393,7 +435,7 @@ make e2e
 
 内部测试失败不会显示隐藏输入。不能通过读取 harness 路径绕过验证。
 
-MVP 只面向本机可信用户。提交代码与平台 harness 当前位于同一最终进程；平台拒绝多个结果 sentinel、过滤完整验证 stdout，并重新计算 benchmark 统计，但不提供抵抗蓄意 `_Exit` + 完整协议伪造的抗作弊边界。不要把本机结果用于不可信用户排名或公网竞赛。
+MVP 只面向本机或认证局域网中的可信操作者。提交代码与平台 harness 当前位于同一最终进程；平台拒绝多个结果 sentinel、过滤完整验证 stdout，并重新计算 benchmark 统计，但不提供抵抗蓄意 `_Exit` + 完整协议伪造的抗作弊边界。不要把结果用于不可信用户排名或公网竞赛。
 
 ### 11.8 Job 一直排队
 
@@ -420,7 +462,7 @@ Runner 在提交输出中发现 GPU 丢失、驱动不兼容、NVML 初始化失
 
 ### 11.10 端口 3000 被占用或绑定错误
 
-用 `ss -ltnp | grep ':3000'` 或 PowerShell 的 `Get-NetTCPConnection` 找到占用者，停止冲突服务后重新启动。不要为避开冲突把服务绑定到 `0.0.0.0`。若看到外部接口监听，立即停止 MyLeetGpu，修正 Compose 的显式 `127.0.0.1` 映射后再运行。
+用 `ss -ltnp | grep ':3000'` 或 PowerShell 的 `Get-NetTCPConnection` 找到占用者，停止冲突服务后重新启动。不要为避开冲突把服务绑定到 `0.0.0.0`。默认模式若看到外部接口监听，立即停止 MyLeetGpu；LAN 模式只允许预期的具体 LAN IPv4，并应核对 `make lan-status` 的认证与防火墙规则。
 
 ### 11.11 migrate 非零退出
 

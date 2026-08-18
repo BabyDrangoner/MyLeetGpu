@@ -1,0 +1,15 @@
+services:
+  web:
+    # Keep the loopback publication from docker-compose.yml and add exactly one
+    # LAN interface. Binding a concrete address avoids an accidental 0.0.0.0
+    # publication on VPN, virtual and future network adapters.
+    ports:
+      - "${MYLEETGPU_LAN_ADDRESS:?set by make start-lan}:${MYLEETGPU_LAN_PORT:-3000}:8080"
+    volumes:
+      - ./apps/web/nginx.lan.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./data/lan.htpasswd:/etc/nginx/lan.htpasswd:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3

@@ -67,9 +67,9 @@ export function EnvironmentPage() {
         <section className="panel safety-card">
           <div className="safety-card-icon"><ShieldCheck size={23} /></div>
           <div>
-            <h2>本地可信边界</h2>
+            <h2>可信单机边界</h2>
             <p>用户代码在受限的一次性容器中执行，但消费级 GPU 与 Docker 不提供公网多租户所需的强 GPU / 显存隔离。</p>
-            <strong>请勿将本服务暴露到公网或局域网。</strong>
+            <strong>局域网模式仅限认证后的可信设备；严禁暴露到公网。</strong>
           </div>
         </section>
       </div>

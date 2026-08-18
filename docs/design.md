@@ -4,9 +4,9 @@
 
 本文描述 MyLeetGpu 首个可运行版本的产品语义、模块边界、数据模型、任务协议、CUDA 执行隔离和运维策略。实现、测试和 UI 应共同遵守本文中的不变量；若接口细节发生变化，应同时更新 OpenAPI、本文和用户指南。
 
-MyLeetGpu 是一个在 Windows + WSL2 + NVIDIA GPU 上运行的本地 CUDA C++ 练习环境。它面向单机、单用户、可信的本机操作者，但仍把待执行的 CUDA 源码视为不可信输入。
+MyLeetGpu 是一个在 Windows + WSL2 + NVIDIA GPU 上运行的本地 CUDA C++ 练习环境。它面向单机、单用户、可信操作者，但仍把待执行的 CUDA 源码视为不可信输入。
 
-> 安全边界：宿主机唯一发布的端口是 `127.0.0.1:3000`。直接运行 API 时默认绑定 `127.0.0.1:8000`；Compose 为了让 Web 容器访问 API，会让 API 在项目内部网络监听 `0.0.0.0:8000`，但不向宿主发布该端口。Docker 与消费级 GPU 不能提供适合公网、多用户对抗场景的强 GPU/显存隔离。本项目不能作为公网判题服务部署，也不能通过额外端口映射、反向代理或隧道向局域网/公网开放。
+> 安全边界：默认宿主机唯一发布的端口是 `127.0.0.1:3000`。显式启用 LAN overlay 时，Nginx 还会在检测出的具体局域网 IPv4 上发布经过 Basic Auth 保护的 3000，并用 Windows + WSL Hyper-V 防火墙限制到 `LocalSubnet`。API 8000 始终不向宿主发布。LAN 模式只方便同一受信任网络中的单一操作者，不提供多租户隔离或传输加密；严禁公网、端口转发和不可信远程提交。
 
 ## 2. 产品目标与非目标
 
@@ -24,7 +24,7 @@ MyLeetGpu 是一个在 Windows + WSL2 + NVIDIA GPU 上运行的本地 CUDA C++ �
 
 ### 2.2 非目标
 
-首版不实现：Debug、断点、单步、变量监视、cuda-gdb、Nsight、Profiler、PTX/汇编查看；登录、权限、多用户、排行榜、讨论、公开解答和支付；Triton、PyTorch、Mojo、JAX、CuTe；面向用户的提交/判题 CLI、云 GPU、远程部署、集群调度、AI Chat 和在线题目管理后台。仓库中的 `myleetgpu.cli` 只承载 `clean-jobs`、`recover-runner` 等本机维护命令，不是另一套产品入口。
+首版不实现：Debug、断点、单步、变量监视、cuda-gdb、Nsight、Profiler、PTX/汇编查看；应用账号、细粒度权限、多用户隔离、排行榜、讨论、公开解答和支付；Triton、PyTorch、Mojo、JAX、CuTe；面向用户的提交/判题 CLI、云 GPU、远程部署、集群调度、AI Chat 和在线题目管理后台。LAN overlay 的 Nginx Basic Auth 只是单一共享入口凭据，不是账号系统。仓库中的 `myleetgpu.cli` 只承载 `clean-jobs`、`recover-runner` 等本机维护命令，不是另一套产品入口。
 
 编译和普通诊断属于正常判题能力，不属于 Debug。平台不会复制 LeetGPU 的品牌、题面、starter、测试或源码；所有内置题目和测试均为本项目原创内容。
 
@@ -64,11 +64,11 @@ flowchart LR
     P --> S
 ```
 
-这是一个模块化单体：Web/API/Worker 是独立进程，但共享同一领域模型和 SQLite 数据库。不引入 Redis、Celery 或 Kubernetes。浏览器只访问 `127.0.0.1:3000`；Nginx 将同源 `/api` 请求转发到 Compose 网络内的 `api:8000`。API 的默认直接运行地址是 `127.0.0.1:8000`；Compose 内部使用 `0.0.0.0:8000` 只是容器间可达要求，`8000` 没有 host `ports` 映射。
+这是一个模块化单体：Web/API/Worker 是独立进程，但共享同一领域模型和 SQLite 数据库。不引入 Redis、Celery 或 Kubernetes。默认浏览器只访问 `127.0.0.1:3000`；可选 LAN overlay 增加具体 LAN IPv4 的同端口映射和 Nginx Basic Auth。Nginx 将同源 `/api` 请求转发到 Compose 网络内的 `api:8000`。API 的默认直接运行地址是 `127.0.0.1:8000`；Compose 内部使用 `0.0.0.0:8000` 只是容器间可达要求，`8000` 没有 host `ports` 映射。
 
 ### 3.2 运行时约束
 
-- Compose 的主机端口映射必须显式写成 `127.0.0.1:3000:...`，不能依赖 Docker 默认绑定。
+- 基础 Compose 的主机端口映射必须显式写成 `127.0.0.1:3000:...`。LAN overlay 必须绑定自动检测或显式给定的单一非回环 IPv4，拒绝 `0.0.0.0`，同时挂载认证配置；不能依赖 Docker 默认绑定。
 - `make start` 先运行一次性 `migrate` 服务执行 `alembic upgrade head`；只有它成功退出，API 与 Worker 才启动。迁移失败不得用空库覆盖旧数据。
 - `/api/health` 仅表示 API 进程存活；`/api/ready` 检查数据库、非空题目注册表、最近一次 Runner 环境快照、`gpu:0` Worker 活跃租约及熔断文件。任一条件失败均返回 503。
 - 编译容器和 GPU 执行容器彼此独立，均为一次性容器。
@@ -435,7 +435,7 @@ Worker 是受信控制平面组件。为了创建一次性容器，它可能需�
 
 NVIDIA 容器运行时仍共享宿主内核、Windows 驱动和物理 GPU。RTX 4060 这类消费级 GPU 没有面向不可信租户的 MIG 切分；Docker 的 CPU/内存限制也不能完整限制显存、GPU 执行时间或驱动攻击面。恶意 kernel 可能拖慢其他图形/GPU 工作、使 CUDA context 或设备失效，极端情况下需要重启 WSL、Docker Desktop 或 Windows。缓存、时序和残留显存等侧信道也不在 MVP 的强隔离保证内。
 
-因此，“localhost + 容器”只是在可信本地使用前提下的纵深防御，不构成公网沙箱、安全边界证明或多租户隔离。若未来需要接收不可信远程用户，必须改为独占机器/虚拟机或可验证的硬件级隔离，并加入身份、授权、速率限制、审计和主机级恢复机制。
+因此，“认证入口 + 容器”只是在可信单机/局域网前提下的纵深防御，不构成公网沙箱、安全边界证明或多租户隔离。若未来需要接收不可信远程用户，必须改为独占机器/虚拟机或可验证的硬件级隔离，并加入身份、授权、速率限制、审计、传输加密和主机级恢复机制。
 
 Validator/benchmark harness 与提交的 `solve` 当前链接为同一最终进程；唯一结果 sentinel、严格结构校验和“多 sentinel 即拒绝”可避免普通 stdout 被当作平台结果，但这不是抗本机操作者主动作弊的加密边界。能故意调用 `_Exit` 并伪造完整平台协议的源码仍可能欺骗同进程结果通道。因此“不采信用户打印时间”成立于正常、非对抗提交：Worker 只接受 harness 协议并重新计算统计值；MVP 不承诺抵抗可信本机用户蓄意伪造。面向不可信提交时必须把受信判定与用户代码拆到不同保护域和结果通道。
 
@@ -503,7 +503,7 @@ Validator/benchmark harness 与提交的 `solve` 当前链接为同一最终进�
 4. **独立 Worker + SQLite 队列。** 避免请求线程执行 Docker，并用租约支持崩溃恢复；MVP 不增加 Redis/Celery 运维面。
 5. **Runner adapter 边界。** Worker 只调用编译、执行、探测和清理方法，不接触 Docker argv；这既便于用 fake runner 做非 GPU 测试，也集中审计参数、超时和清理。
 6. **固定镜像和可复现题目协议。** 镜像 digest、suite hash、revision、环境指纹和编译配置共同定义测量上下文。
-7. **同源、loopback-only。** 降低本地部署复杂度和意外暴露风险，但不把 localhost 当作身份验证机制。
+7. **同源、默认 loopback。** 默认降低部署复杂度和意外暴露风险；显式 LAN overlay 使用单一接口、共享 Basic Auth 和 LocalSubnet 防火墙规则，但不把它宣称为账号或多租户权限系统。
 8. **轮询 Job 状态。** MVP 可靠且容易恢复；未来可加 SSE，但不改变持久状态机。
 
 ## 15. 限制与后续路线
@@ -536,4 +536,4 @@ Validator/benchmark harness 与提交的 `solve` 当前链接为同一最终进�
 - GPU Job 严格串行；所有终态都触发容器和 spool 清理。
 - 内部测试和路径不会经 API、日志或 NVCC 诊断泄漏。
 - 不同 revision、suite、编译配置或环境指纹的成绩不会被标为可直接比较。
-- 直接运行 API 时默认绑定 loopback，Compose 向宿主只发布 `127.0.0.1:3000`；内部 API 的 `0.0.0.0:8000` 不发布到宿主。文档与 UI 均提示禁止公网暴露。
+- 直接运行 API 时默认绑定 loopback；基础 Compose 只发布 `127.0.0.1:3000`，显式 LAN overlay 才增加具体局域网 IPv4 的认证 Web 映射；内部 API 的 `0.0.0.0:8000` 从不发布到宿主。文档与 UI 均提示禁止公网暴露。

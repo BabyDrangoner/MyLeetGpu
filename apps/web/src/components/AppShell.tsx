@@ -7,6 +7,8 @@ import { readableStatus } from '../lib/format'
 export function AppShell() {
   const environment = useAsync(() => api.environment(), [])
   const healthy = environment.data?.healthy ?? environment.data?.status === 'healthy'
+  const hostname = window.location.hostname
+  const localMode = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1'
 
   return (
     <div className="app-shell">
@@ -49,7 +51,7 @@ export function AppShell() {
         </NavLink>
         <div className="trust-notice">
           <ShieldCheck size={16} />
-          <span>仅供本机可信用户使用</span>
+          <span>仅供可信操作者使用</span>
         </div>
         <a className="sidebar-link" href="https://github.com/BabyDrangoner/MyLeetGpu" target="_blank" rel="noreferrer">
           <Github size={15} />
@@ -59,7 +61,9 @@ export function AppShell() {
 
       <main className="main-content">
         <header className="topbar">
-          <div className="local-pill"><Activity size={14} /> 127.0.0.1 · 本地模式</div>
+          <div className="local-pill">
+            <Activity size={14} /> {localMode ? '127.0.0.1 · 本地模式' : `${hostname} · 认证局域网`}
+          </div>
           <div className="topbar-note">编译与 GPU 任务串行、安全隔离执行</div>
         </header>
         <div className="route-content">

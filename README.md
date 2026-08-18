@@ -1,8 +1,8 @@
 # MyLeetGpu
 
-MyLeetGpu 是一个面向本机可信用户的 CUDA C++ 编程、正确性验证与 GPU 性能比较环境。首版内置三道原创题，提供 Monaco 编辑器、异步隔离 Judge、手动性能版本、持久化 benchmark 和统一口径比较。
+MyLeetGpu 是一个面向单机可信操作者的 CUDA C++ 编程、正确性验证与 GPU 性能比较环境。首版内置三道原创题，提供 Monaco 编辑器、异步隔离 Judge、手动性能版本、持久化 benchmark 和统一口径比较。
 
-> 安全边界：本项目仅供 Windows + WSL2 上的本机可信用户使用，只发布到 `127.0.0.1`。消费级 GPU 与 Docker 不提供公网多租户所需的强 GPU/显存隔离，请勿把服务暴露到局域网或公网。
+> 安全边界：默认只发布到 `127.0.0.1`。可选的 `make start-lan` 仅供受信任的家庭/实验室局域网使用，要求 Basic Auth，并将防火墙范围限制为本地子网。它不是多用户权限系统；消费级 GPU 与 Docker 不提供公网多租户所需的强 GPU/显存隔离。严禁公网、路由器端口转发或公共 Wi-Fi 暴露。
 
 ## Quick Start
 
@@ -26,6 +26,17 @@ make clean-jobs    # 清理不再被活动任务引用的临时目录
 
 首次启动会拉取固定版本的 CUDA 镜像并构建本地服务镜像，耗时取决于网络。持久数据保存在 `./data/myleetgpu.db`；源码快照只会在用户显式“保存为性能版本”且完整验证、benchmark 均成功后进入数据库。
 
+### 可选：同一局域网访问
+
+本机已使用 WSL mirrored networking 时，可从提升权限的 Windows/WSL 终端依次执行：
+
+```bash
+make lan-firewall   # 只允许 LocalSubnet 访问当前 LAN IP 的 TCP/3000
+make start-lan      # 首次会创建并只显示一次随机密码
+```
+
+终端会打印类似 `http://192.168.31.106:3000` 的地址。用户名默认为 `myleetgpu`。服务仍同时保留 `http://localhost:3000`，但 LAN overlay 启用期间两者都需要认证。轮换密码使用 `make lan-password`，关闭后执行 `make stop-lan` 和 `make lan-firewall-off`。不要发布 API 8000。
+
 ## 开发与测试
 
 ```bash
@@ -36,7 +47,7 @@ make test-gpu      # 必须连接真实 NVIDIA GPU，不会回退到 mock
 make e2e
 ```
 
-常用命令还包括 `make migrate`、`make recover-runner` 和 `make help`。所有 Compose 宿主端口均绑定 loopback，API 通过同源 `/api` 提供。
+常用命令还包括 `make migrate`、`make recover-runner` 和 `make help`。默认 Compose 只绑定 loopback；可选 LAN overlay 只额外发布经过认证的 Web 端口，API 始终通过同源 `/api` 提供。
 
 ## 文档
 
