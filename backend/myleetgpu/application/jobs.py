@@ -37,6 +37,7 @@ class JobService:
         self,
         *,
         problem_id: str,
+        language: str = "cuda_cpp",
         action: JobAction,
         source: str | None = None,
         version_name: str | None = None,
@@ -48,6 +49,10 @@ class JobService:
             problem = self.catalog.get(problem_id)
         except KeyError as error:
             raise JobSubmissionError(str(error)) from error
+        try:
+            implementation = problem.get_implementation(language)
+        except KeyError as error:
+            raise JobSubmissionError(f"题目不支持实现语言: {language}") from error
 
         if action is JobAction.REBENCHMARK:
             selected = version_ids or []
@@ -58,6 +63,8 @@ class JobService:
                 version.problem_id != problem_id for version in versions
             ):
                 raise JobSubmissionError("every selected version must belong to the problem")
+            if any(version.language != language for version in versions):
+                raise JobSubmissionError("rebenchmark versions must use one requested language")
         else:
             self._validate_source(source)
         submitted_hash = source_hash(source) if source is not None else None
@@ -72,7 +79,9 @@ class JobService:
                 raise JobSubmissionError("version_name is longer than 120 characters")
             if notes is not None and len(notes) > 4000:
                 raise JobSubmissionError("notes is longer than 4000 characters")
-            duplicates = self.repository.find_duplicate_versions(problem_id, submitted_hash or "")
+            duplicates = self.repository.find_duplicate_versions(
+                problem_id, submitted_hash or "", language
+            )
             if duplicates and not allow_duplicate:
                 raise DuplicateSourceError(
                     [{"id": item.id, "name": item.name} for item in duplicates]
@@ -88,7 +97,7 @@ class JobService:
         try:
             if source is not None:
                 stored_hash = submitted_hash
-                self._write_snapshot(spool_dir / "source.cu", source)
+                self._write_snapshot(spool_dir / f"source{implementation.source_suffix}", source)
             payload: dict[str, Any] = {}
             if normalized_name is not None:
                 payload["version_name"] = normalized_name
@@ -100,6 +109,7 @@ class JobService:
                 id=job_id,
                 problem_id=problem_id,
                 problem_revision=problem.manifest.revision,
+                language=language,
                 action=action.value,
                 status=JobStatus.QUEUED.value,
                 phase="queued",

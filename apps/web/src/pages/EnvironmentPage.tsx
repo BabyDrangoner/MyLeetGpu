@@ -1,7 +1,9 @@
 import { AlertTriangle, Box, CheckCircle2, Cpu, Fingerprint, Gauge, RefreshCw, ShieldCheck, TerminalSquare } from 'lucide-react'
+import { useState } from 'react'
 import { api } from '../api/client'
 import { RetryButton, StatusView } from '../components/StatusView'
 import { useAsync } from '../hooks/useAsync'
+import type { KernelLanguage } from '../domain/types'
 import { formatDate } from '../lib/format'
 
 function Fact({ label, value, icon }: { label: string; value?: string; icon: React.ReactNode }) {
@@ -15,8 +17,10 @@ function Fact({ label, value, icon }: { label: string; value?: string; icon: Rea
 }
 
 export function EnvironmentPage() {
-  const environment = useAsync(() => api.environment(), [])
-  if (environment.loading) return <div className="page"><StatusView kind="loading" title="正在探测 GPU 与 CUDA 环境" description="检查本地 Runner 报告的最近一次环境快照。" /></div>
+  const [language, setLanguage] = useState<KernelLanguage>('cuda_cpp')
+  const environment = useAsync(() => api.environment(language), [language])
+  const runtimeLabel = language === 'triton_python' ? 'Triton (Python)' : 'CUDA C++'
+  if (environment.loading) return <div className="page"><StatusView kind="loading" title={`正在探测 ${runtimeLabel} GPU 环境`} description="检查本地 Runner 报告的最近一次环境快照。" /></div>
   if (environment.error || !environment.data) {
     return <div className="page"><StatusView kind="error" title="无法读取环境状态" description={environment.error?.message} action={<RetryButton onClick={() => void environment.reload()} />} /></div>
   }
@@ -30,15 +34,21 @@ export function EnvironmentPage() {
           <h1>运行环境</h1>
           <p>这里展示 Runner 最近一次真实探测结果；缺失指标会诚实标记为 unavailable。</p>
         </div>
-        <button className="button secondary" type="button" onClick={() => void environment.reload()}><RefreshCw size={16} />刷新状态</button>
+        <div className="environment-heading-actions">
+          <div className="language-switch" role="group" aria-label="运行环境语言">
+            <button className={language === 'cuda_cpp' ? 'active' : ''} type="button" onClick={() => setLanguage('cuda_cpp')}>CUDA C++</button>
+            <button className={language === 'triton_python' ? 'active' : ''} type="button" onClick={() => setLanguage('triton_python')}>Triton (Python)</button>
+          </div>
+          <button className="button secondary" type="button" onClick={() => void environment.reload()}><RefreshCw size={16} />刷新状态</button>
+        </div>
       </div>
 
       <section className={`environment-hero ${healthy ? 'healthy' : 'unhealthy'}`}>
         <div className="environment-device-mark"><Cpu size={37} /></div>
         <div className="environment-device-copy">
-          <span className="environment-kicker">NVIDIA GPU</span>
+          <span className="environment-kicker">NVIDIA GPU · {runtimeLabel}</span>
           <h2>{data.gpu_name ?? data.gpu ?? '未检测到 GPU'}</h2>
-          <p>{data.message ?? (healthy ? 'CUDA 执行链路已通过最近一次健康检查。' : 'Runner 当前不会接受新的 GPU 任务，请按诊断提示恢复。')}</p>
+          <p>{data.message ?? (healthy ? `${runtimeLabel} 执行链路已通过最近一次健康检查。` : 'Runner 当前不会接受新的 GPU 任务，请按诊断提示恢复。')}</p>
         </div>
         <div className={`health-badge ${healthy ? 'healthy' : 'unhealthy'}`}>
           {healthy ? <CheckCircle2 size={18} /> : <AlertTriangle size={18} />}
@@ -50,7 +60,9 @@ export function EnvironmentPage() {
         <Fact label="Compute Capability" value={data.compute_capability ? `sm_${data.compute_capability.replace('.', '')}` : undefined} icon={<Gauge size={18} />} />
         <Fact label="Windows 驱动" value={data.driver_version} icon={<TerminalSquare size={18} />} />
         <Fact label="CUDA Runtime" value={data.cuda_runtime_version ?? data.cuda_version} icon={<Cpu size={18} />} />
-        <Fact label="NVCC" value={data.nvcc_version} icon={<TerminalSquare size={18} />} />
+        {language === 'triton_python'
+          ? <Fact label="Python / PyTorch / Triton" value={[data.python_version, data.torch_version, data.triton_version].filter(Boolean).join(' / ')} icon={<TerminalSquare size={18} />} />
+          : <Fact label="NVCC" value={data.nvcc_version} icon={<TerminalSquare size={18} />} />}
         <Fact label="容器镜像" value={data.container_image} icon={<Box size={18} />} />
         <Fact label="环境指纹" value={data.fingerprint} icon={<Fingerprint size={18} />} />
       </div>

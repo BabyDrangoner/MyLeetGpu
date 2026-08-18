@@ -19,6 +19,7 @@ def _latest_run(version: VersionRecord) -> BenchmarkRunRecord:
 
 def _key(version: VersionRecord, run: BenchmarkRunRecord) -> ComparabilityKey:
     return ComparabilityKey(
+        language=version.language,
         problem_revision=version.problem_revision,
         suite_hash=run.suite_hash,
         input_sizes=run.input_sizes_json,
@@ -33,6 +34,7 @@ def compare_versions(
     problem_id: str,
     version_ids: list[str],
     baseline_id: str,
+    language: str | None = None,
 ) -> dict[str, Any]:
     if len(version_ids) < 2 or len(version_ids) > 8 or len(set(version_ids)) != len(version_ids):
         raise ComparisonError("select 2 to 8 unique versions")
@@ -43,6 +45,8 @@ def compare_versions(
         raise ComparisonError("one or more versions do not exist")
     if any(version.problem_id != problem_id for version in versions):
         raise ComparisonError("all versions must belong to the same problem")
+    if language is not None and any(version.language != language for version in versions):
+        raise ComparisonError("all versions must use the requested implementation language")
 
     by_id = {version.id: version for version in versions}
     baseline = by_id[baseline_id]
@@ -99,6 +103,7 @@ def compare_versions(
                 "id": version.id,
                 "name": version.name,
                 "problem_revision": version.problem_revision,
+                "language": version.language,
                 "source_hash": version.source_hash,
                 "environment": _environment_dict(runs[version.id]),
                 "suite_hash": runs[version.id].suite_hash,
@@ -115,6 +120,7 @@ def _environment_dict(run: BenchmarkRunRecord) -> dict[str, Any]:
     environment = run.environment
     return {
         "fingerprint": environment.fingerprint,
+        "backend": environment.backend,
         "gpu_name": environment.gpu_name,
         "compute_capability": environment.compute_capability,
         "driver_version": environment.driver_version,
@@ -122,4 +128,5 @@ def _environment_dict(run: BenchmarkRunRecord) -> dict[str, Any]:
         "nvcc_version": environment.nvcc_version,
         "cuda_image": environment.cuda_image,
         "image_digest": environment.image_digest,
+        "toolchain": environment.toolchain_json,
     }

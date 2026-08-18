@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from myleetgpu.domain.jobs import JobAction
 
+KernelLanguage = Literal["cuda_cpp", "triton_python"]
+
 
 class JobCreate(BaseModel):
     problem_id: str = Field(min_length=1, max_length=128)
+    language: KernelLanguage = "cuda_cpp"
     action: JobAction
     source: str | None = None
     version_name: str | None = Field(default=None, max_length=120)
@@ -22,6 +25,7 @@ class JobResponse(BaseModel):
     id: str
     problem_id: str
     problem_revision: str
+    language: KernelLanguage
     action: str
     status: str
     phase: str
@@ -36,6 +40,7 @@ class JobResponse(BaseModel):
 
 
 class DraftUpdate(BaseModel):
+    language: KernelLanguage = "cuda_cpp"
     source: str = Field(min_length=1, max_length=262_144)
 
 
@@ -59,5 +64,6 @@ class VersionUpdate(BaseModel):
 
 class CompareRequest(BaseModel):
     problem_id: str = Field(min_length=1, max_length=128)
+    language: KernelLanguage | None = None
     version_ids: list[str] = Field(min_length=2, max_length=8)
     baseline_id: str

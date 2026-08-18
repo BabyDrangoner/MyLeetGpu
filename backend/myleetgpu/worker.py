@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from myleetgpu.config import Settings, get_settings
 from myleetgpu.domain.benchmark import Measurement, source_hash
 from myleetgpu.domain.jobs import GPU_RESOURCE, ErrorCode, JobAction, JobError, JobStatus
-from myleetgpu.domain.problems import Problem, ProblemCatalog
+from myleetgpu.domain.problems import KernelLanguage, Problem, ProblemCatalog, ProblemImplementation
 from myleetgpu.filesystem import ensure_mode
 from myleetgpu.infrastructure.database import Base, build_engine, build_session_factory
 from myleetgpu.infrastructure.logging import configure_logging
@@ -166,15 +166,25 @@ class Worker:
                 )
             )
         action = JobAction(job.action)
+        try:
+            implementation = problem.get_implementation(job.language)
+        except KeyError as error:
+            raise JobFailed(
+                JobError(
+                    code=ErrorCode.INVALID_REQUEST,
+                    message="题目不再支持任务指定的实现语言",
+                    stage="queued",
+                )
+            ) from error
         if action is JobAction.REBENCHMARK:
-            return self._rebenchmark(job, spool, problem)
+            return self._rebenchmark(job, spool, problem, implementation)
 
-        source_path = self._verified_source(job, spool)
+        source_path = self._verified_source(job, spool, implementation)
         if (
             action is JobAction.SAVE_VERSION
             and not job.payload_json.get("allow_duplicate")
             and self.repository.find_duplicate_versions(
-                problem.manifest.slug, job.source_hash or ""
+                problem.manifest.slug, job.source_hash or "", job.language
             )
         ):
             raise JobFailed(
@@ -184,13 +194,21 @@ class Worker:
                     stage="queued",
                 )
             )
-        validator = self.runner.compile(spool, problem, source_path, harness_kind="validator")
-        self._require_compile(validator)
+        validator = self.runner.compile(
+            spool,
+            problem,
+            source_path,
+            harness_kind="validator",
+            language=job.language,
+            implementation=implementation,
+        )
+        self._require_compile(validator, job.language)
         if action is JobAction.COMPILE:
             return {
                 "compiled": True,
                 "diagnostics": validator.diagnostics,
                 "duration_seconds": validator.duration_seconds,
+                "language": job.language,
             }
 
         mode = "public" if action is JobAction.RUN else "full"
@@ -204,11 +222,13 @@ class Worker:
         )
         timeout = self._execution_timeout(problem, mode)
         self._assert_gpu_lease()
+        self._require_runtime_environment(job.language)
         validation = self.runner.execute(
             spool,
             validator.executable,
             mode=mode,
             timeout_seconds=timeout,  # type: ignore[arg-type]
+            language=job.language,
         )
         safe_correctness = self._safe_correctness(problem, mode, validation.parsed)
         self._require_execution(validation, mode, safe_correctness)
@@ -217,6 +237,7 @@ class Worker:
                 "correctness": safe_correctness,
                 "output": validation.output if mode == "public" else None,
                 "compile_diagnostics": validator.diagnostics,
+                "language": job.language,
             }
 
         self.repository.transition_job(
@@ -225,8 +246,8 @@ class Worker:
             phase="benchmarking",
             progress=0.62,
         )
-        benchmark = self._run_benchmark(spool, problem, source_path)
-        probe = self.runner.probe_environment(force=True)
+        benchmark = self._run_benchmark(spool, problem, implementation, source_path, job.language)
+        probe = self._probe_for_language(job.language, force=True)
         if not probe.healthy:
             raise RunnerFailure(probe.error or "GPU environment became unhealthy")
         environment = self.repository.save_environment(probe, force_new=True)
@@ -234,7 +255,9 @@ class Worker:
         measurements, raw_samples = self._normalize_measurements(problem, benchmark)
         payload = job.payload_json
         if not payload.get("allow_duplicate") and self.repository.find_duplicate_versions(
-            problem.manifest.slug, job.source_hash or source_hash(source)
+            problem.manifest.slug,
+            job.source_hash or source_hash(source),
+            job.language,
         ):
             raise JobFailed(
                 JobError(
@@ -246,13 +269,19 @@ class Worker:
         version = self.repository.create_version_with_benchmark(
             problem_id=problem.manifest.slug,
             problem_revision=problem.manifest.revision,
+            language=job.language,
             name=str(payload["version_name"]),
             notes=payload.get("notes"),
             source_code=source,
             source_hash=job.source_hash or source_hash(source),
-            compile_flags=self.runner.effective_compile_flags(problem, probe),
+            compile_flags=self.runner.effective_compile_flags(
+                problem,
+                probe,
+                language=job.language,
+                implementation=implementation,
+            ),
             environment_id=environment.id,
-            suite_hash=problem.suite_hash,
+            suite_hash=implementation.suite_hash,
             protocol_version=problem.manifest.benchmark.protocol_version,
             input_sizes=[item.label for item in problem.manifest.benchmark.sizes],
             seed=problem.manifest.benchmark.suite_seed,
@@ -265,9 +294,16 @@ class Worker:
             "version_id": version.id,
             "correctness": safe_correctness,
             "benchmark": {"measurements": measurements},
+            "language": job.language,
         }
 
-    def _rebenchmark(self, job: JobRecord, spool: Path, problem: Problem) -> dict[str, Any]:
+    def _rebenchmark(
+        self,
+        job: JobRecord,
+        spool: Path,
+        problem: Problem,
+        implementation: ProblemImplementation,
+    ) -> dict[str, Any]:
         version_ids = list(job.payload_json.get("version_ids", []))
         versions = self.repository.get_versions(version_ids)
         if len(versions) != len(version_ids):
@@ -286,7 +322,15 @@ class Worker:
                     stage="validating",
                 )
             )
-        probe = self.runner.probe_environment(force=True)
+        if any(version.language != job.language for version in versions):
+            raise JobFailed(
+                JobError(
+                    code=ErrorCode.INVALID_REQUEST,
+                    message="统一重测只能包含同一种实现语言",
+                    stage="validating",
+                )
+            )
+        probe = self._probe_for_language(job.language, force=True)
         if not probe.healthy:
             raise RunnerFailure(probe.error or "GPU environment is unavailable")
         environment = self.repository.save_environment(probe, force_new=True)
@@ -302,19 +346,25 @@ class Worker:
         for index, version in enumerate(versions):
             version_root = spool / f"version-{index + 1}"
             version_root.mkdir(mode=0o700)
-            source_path = version_root / "source.cu"
+            source_path = version_root / f"source{implementation.source_suffix}"
             source_path.write_text(version.source_code, encoding="utf-8", newline="\n")
             ensure_mode(source_path, 0o600)
             validator = self.runner.compile(
-                version_root, problem, source_path, harness_kind="validator"
+                version_root,
+                problem,
+                source_path,
+                harness_kind="validator",
+                language=job.language,
+                implementation=implementation,
             )
-            self._require_compile(validator)
+            self._require_compile(validator, job.language)
             self._assert_gpu_lease()
             validation = self.runner.execute(
                 version_root,
                 validator.executable,  # type: ignore[arg-type]
                 mode="full",
                 timeout_seconds=self._execution_timeout(problem, "full"),
+                language=job.language,
             )
             self._require_execution(
                 validation,
@@ -336,15 +386,26 @@ class Worker:
             progress=0.5,
         )
         for index, (version, version_root, source_path) in enumerate(prepared):
-            benchmark = self._run_benchmark(version_root, problem, source_path)
+            benchmark = self._run_benchmark(
+                version_root,
+                problem,
+                implementation,
+                source_path,
+                job.language,
+            )
             measurements, raw_samples = self._normalize_measurements(problem, benchmark)
             pending_rows.append(
                 {
                     "version_id": version.id,
                     "environment_snapshot_id": environment.id,
-                    "suite_hash": problem.suite_hash,
+                    "suite_hash": implementation.suite_hash,
                     "protocol_version": problem.manifest.benchmark.protocol_version,
-                    "compile_flags_json": self.runner.effective_compile_flags(problem, probe),
+                    "compile_flags_json": self.runner.effective_compile_flags(
+                        problem,
+                        probe,
+                        language=job.language,
+                        implementation=implementation,
+                    ),
                     "input_sizes_json": [item.label for item in problem.manifest.benchmark.sizes],
                     "seed": problem.manifest.benchmark.suite_seed,
                     "warmup": problem.manifest.benchmark.warmup,
@@ -361,11 +422,29 @@ class Worker:
                 progress=0.5 + 0.45 * ((index + 1) / len(versions)),
             )
         self.repository.add_benchmark_runs(pending_rows)
-        return {"rebenchmarked": summaries, "environment_fingerprint": probe.fingerprint}
+        return {
+            "rebenchmarked": summaries,
+            "environment_fingerprint": probe.fingerprint,
+            "language": job.language,
+        }
 
-    def _run_benchmark(self, spool: Path, problem: Problem, source_path: Path) -> ExecutionResult:
-        compiled = self.runner.compile(spool, problem, source_path, harness_kind="benchmark")
-        self._require_compile(compiled)
+    def _run_benchmark(
+        self,
+        spool: Path,
+        problem: Problem,
+        implementation: ProblemImplementation,
+        source_path: Path,
+        language: str,
+    ) -> ExecutionResult:
+        compiled = self.runner.compile(
+            spool,
+            problem,
+            source_path,
+            harness_kind="benchmark",
+            language=language,
+            implementation=implementation,
+        )
+        self._require_compile(compiled, language)
         self._assert_gpu_lease()
         result = self.runner.execute(
             spool,
@@ -375,13 +454,16 @@ class Worker:
                 self.settings.benchmark_timeout_seconds,
                 problem.manifest.timeouts.benchmark_ms / 1000,
             ),
+            language=language,
         )
         self._require_execution(result, "benchmark")
         return result
 
     @staticmethod
-    def _verified_source(job: JobRecord, spool: Path) -> Path:
-        path = spool / "source.cu"
+    def _verified_source(
+        job: JobRecord, spool: Path, implementation: ProblemImplementation
+    ) -> Path:
+        path = spool / f"source{implementation.source_suffix}"
         if not path.is_file():
             raise JobFailed(
                 JobError(
@@ -404,15 +486,16 @@ class Worker:
         return path
 
     @staticmethod
-    def _require_compile(result: CompileResult) -> None:
+    def _require_compile(result: CompileResult, language: str = "cuda_cpp") -> None:
         if result.succeeded:
             return
+        toolchain = "Triton/Python 提交策略预检" if language == "triton_python" else "NVCC 编译"
         if result.timed_out:
-            code, message = ErrorCode.TIMEOUT, "NVCC 编译超时"
+            code, message = ErrorCode.TIMEOUT, f"{toolchain}超时"
         elif result.output_limited:
-            code, message = ErrorCode.OUTPUT_LIMIT, "NVCC 诊断输出超过限制"
+            code, message = ErrorCode.OUTPUT_LIMIT, f"{toolchain}诊断输出超过限制"
         else:
-            code, message = ErrorCode.COMPILE_ERROR, "NVCC 编译失败"
+            code, message = ErrorCode.COMPILE_ERROR, f"{toolchain}失败"
         raise JobFailed(JobError(code=code, message=message, stage="compiling"), result.diagnostics)
 
     @staticmethod
@@ -437,6 +520,13 @@ class Worker:
                 message="结果与参考实现不一致",
                 stage=stage,
                 details={"correctness": safe_correctness or {"status": "wrong_answer"}},
+            )
+        elif result.parsed and result.parsed.get("status") == "compile_error":
+            error = JobError(
+                code=ErrorCode.COMPILE_ERROR,
+                message="Triton GPU 专化编译失败",
+                stage=stage,
+                details={"result": {"status": "compile_error"}},
             )
         else:
             error = JobError(
@@ -639,6 +729,21 @@ class Worker:
         )
         self.repository.save_environment(probe)
         self._last_environment_probe = time.monotonic()
+        return probe
+
+    def _probe_for_language(self, language: str, *, force: bool) -> EnvironmentProbe:
+        if language == KernelLanguage.TRITON_PYTHON.value:
+            return self.runner.probe_triton_environment(force=force)
+        return self.runner.probe_environment(force=force)
+
+    def _require_runtime_environment(self, language: str) -> EnvironmentProbe:
+        probe = self._probe_for_language(language, force=False)
+        # Make a language-specific status observation visible even for ordinary
+        # run/validate jobs. Repository deduplication keeps this mutable status
+        # row separate from immutable benchmark snapshots.
+        self.repository.save_environment(probe)
+        if not probe.healthy:
+            raise RunnerFailure(probe.error or f"{language} runtime is unavailable")
         return probe
 
     def _cleanup_job_ids(self, job_ids: list[str]) -> None:

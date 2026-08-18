@@ -1,19 +1,23 @@
 import { AlertTriangle, ArrowLeft, BarChart3, Check, CheckCircle2, Code2, Edit3, GitCompareArrows, LoaderCircle, Play, RefreshCw, Trash2, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
 import { CodeDiff } from '../components/CodeEditor'
 import { JobPanel } from '../components/JobPanel'
 import { Modal } from '../components/Modal'
 import { RetryButton, StatusView } from '../components/StatusView'
 import { useToast } from '../components/Toast'
-import type { ComparisonResult, Job, SavedVersion } from '../domain/types'
+import type { ComparisonResult, Job, KernelLanguage, SavedVersion } from '../domain/types'
 import { useAsync } from '../hooks/useAsync'
 import { useJob } from '../hooks/useJob'
 import { comparisonMetric, latestBenchmarkRun, localComparability } from '../lib/benchmark'
 import { formatDate, formatMetric, formatPercent } from '../lib/format'
 
 const MAX_SELECTED_VERSIONS = 8
+const kernelLanguages: KernelLanguage[] = ['cuda_cpp', 'triton_python']
+const EMPTY_VERSIONS: SavedVersion[] = []
+const isKernelLanguage = (value: string | null): value is KernelLanguage => value === 'cuda_cpp' || value === 'triton_python'
+const languageLabel = (language: KernelLanguage) => language === 'triton_python' ? 'Triton (Python)' : 'CUDA C++'
 
 function latestRun(version: SavedVersion) {
   return latestBenchmarkRun(version)
@@ -25,6 +29,7 @@ function shortHash(hash?: string) {
 
 export function VersionsPage() {
   const { slug = '' } = useParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const toast = useToast()
   const problem = useAsync(() => api.problems.get(slug), [slug])
   const versionsState = useAsync(() => api.versions.list(slug), [slug])
@@ -44,7 +49,19 @@ export function VersionsPage() {
   const [diffModified, setDiffModified] = useState('')
   const compareRequest = useRef(0)
 
-  const versions = versionsState.data ?? []
+  const versions = versionsState.data ?? EMPTY_VERSIONS
+  const supportedLanguages = useMemo(
+    () => kernelLanguages.filter((language) => problem.data?.implementations[language]),
+    [problem.data],
+  )
+  const requestedLanguage = searchParams.get('language')
+  const language = isKernelLanguage(requestedLanguage) && supportedLanguages.includes(requestedLanguage)
+    ? requestedLanguage
+    : problem.data?.default_language ?? supportedLanguages[0] ?? 'cuda_cpp'
+  const visibleVersions = useMemo(
+    () => versions.filter((version) => version.language === language),
+    [language, versions],
+  )
   const selectedVersions = useMemo(
     () => selected.map((id) => versions.find((version) => version.id === id)).filter((version): version is SavedVersion => !!version),
     [selected, versions],
@@ -63,25 +80,36 @@ export function VersionsPage() {
   const retestJob = useJob(reloadAfterJob)
 
   useEffect(() => {
-    if (!versions.length || selected.length) return
-    const defaults = versions.slice(0, 2).map(({ id }) => id)
+    if (!problem.data || searchParams.get('language') === language) return
+    const next = new URLSearchParams(searchParams)
+    next.set('language', language)
+    setSearchParams(next, { replace: true })
+  }, [language, problem.data, searchParams, setSearchParams])
+
+  useEffect(() => {
+    const defaults = visibleVersions.slice(0, 2).map(({ id }) => id)
     setSelected(defaults)
     setBaselineId(defaults[0] ?? '')
     setDiffOriginal(defaults[0] ?? '')
     setDiffModified(defaults[1] ?? defaults[0] ?? '')
-  }, [versions, selected.length])
+    setComparison(null)
+    setComparisonError(null)
+  }, [language, visibleVersions])
 
   useEffect(() => {
-    if (selected.length < 2 || !baselineId || !selected.includes(baselineId)) {
+    const allInCurrentLanguage = selectedVersions.every((version) => version.language === language)
+    if (selected.length < 2 || !baselineId || !selected.includes(baselineId) || !allInCurrentLanguage) {
+      ++compareRequest.current
       setComparison(null)
       setComparisonError(null)
+      setComparisonLoading(false)
       return
     }
     const current = ++compareRequest.current
     setComparisonLoading(true)
     setComparisonError(null)
     const timer = window.setTimeout(() => {
-      void api.versions.compare(slug, selected, baselineId).then((result) => {
+      void api.versions.compare(slug, language, selected, baselineId).then((result) => {
         if (current === compareRequest.current) setComparison(result)
       }).catch((error) => {
         if (current === compareRequest.current) {
@@ -93,7 +121,15 @@ export function VersionsPage() {
       })
     }, 250)
     return () => window.clearTimeout(timer)
-  }, [baselineId, selected, slug, versionsState.data])
+  }, [baselineId, language, selected, selectedVersions, slug, versionsState.data])
+
+  const selectLanguage = (nextLanguage: KernelLanguage) => {
+    if (retestJob.busy || nextLanguage === language) return
+    retestJob.clear()
+    const next = new URLSearchParams(searchParams)
+    next.set('language', nextLanguage)
+    setSearchParams(next)
+  }
 
   const applySelection = (next: string[]) => {
     setSelected(next)
@@ -103,6 +139,11 @@ export function VersionsPage() {
   }
 
   const toggleSelected = (id: string) => {
+    const version = visibleVersions.find((item) => item.id === id)
+    if (!version || version.language !== language) {
+      toast.show('性能比较不允许混合实现语言', 'error')
+      return
+    }
     if (!selected.includes(id) && selected.length >= MAX_SELECTED_VERSIONS) {
       toast.show(`一次最多比较 ${MAX_SELECTED_VERSIONS} 个版本`, 'error')
       return
@@ -152,7 +193,7 @@ export function VersionsPage() {
   const startRetest = async () => {
     setRetestOpen(false)
     try {
-      await retestJob.start({ problem_id: slug, action: 'rebenchmark', version_ids: selected })
+      await retestJob.start({ problem_id: slug, language, action: 'rebenchmark', version_ids: selected })
     } catch (error) {
       toast.show(error instanceof Error ? error.message : '提交重测失败', 'error')
     }
@@ -172,9 +213,9 @@ export function VersionsPage() {
     <div className="page versions-page">
       <div className="page-heading versions-heading">
         <div>
-          <Link className="back-link" to={`/problems/${encodeURIComponent(slug)}`}><ArrowLeft size={15} />返回编辑器</Link>
+          <Link className="back-link" to={`/problems/${encodeURIComponent(slug)}?language=${language}`}><ArrowLeft size={15} />返回编辑器</Link>
           <h1>性能版本 · {problem.data.title}</h1>
-          <p>选择至少两个版本，以同一个 baseline 查看逐规模 speedup。</p>
+          <p>在同一实现语言内选择至少两个版本，以同一个 baseline 查看逐规模 speedup。</p>
         </div>
         <button className="button accent" type="button" disabled={selected.length < 1 || retestJob.busy} onClick={() => setRetestOpen(true)}>
           {retestJob.busy ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}
@@ -182,22 +223,31 @@ export function VersionsPage() {
         </button>
       </div>
 
-      {!versions.length ? (
+      <div className="version-language-tabs" role="group" aria-label="性能版本语言">
+        {supportedLanguages.map((item) => (
+          <button key={item} type="button" className={language === item ? 'active' : ''} disabled={retestJob.busy} onClick={() => selectLanguage(item)}>
+            {languageLabel(item)} <span>{versions.filter((version) => version.language === item).length}</span>
+          </button>
+        ))}
+        <p>性能数据按实现语言分组，不生成跨语言 speedup。</p>
+      </div>
+
+      {!visibleVersions.length ? (
         <StatusView
           kind="empty"
-          title="还没有性能版本"
-          description="回到编辑器，点击“保存为性能版本”。平台会在验证与 benchmark 都成功后创建第一条记录。"
-          action={<Link className="button primary" to={`/problems/${encodeURIComponent(slug)}`}>去保存第一个版本</Link>}
+          title={`还没有 ${languageLabel(language)} 性能版本`}
+          description="回到当前语言编辑器，点击“保存为性能版本”。平台会在验证与 benchmark 都成功后创建第一条记录。"
+          action={<Link className="button primary" to={`/problems/${encodeURIComponent(slug)}?language=${language}`}>去保存第一个版本</Link>}
         />
       ) : (
         <>
           <section className="version-picker panel">
             <header className="panel-heading">
-              <div><h2>已保存版本</h2><p>已选择 {selected.length} / {Math.min(versions.length, MAX_SELECTED_VERSIONS)}；圆点表示 baseline。</p></div>
+              <div><h2>{languageLabel(language)} 已保存版本</h2><p>已选择 {selected.length} / {Math.min(visibleVersions.length, MAX_SELECTED_VERSIONS)}；圆点表示 baseline。</p></div>
               <span className="immutable-label">代码与测量快照不可变</span>
             </header>
             <div className="version-list">
-              {versions.map((version) => {
+              {visibleVersions.map((version) => {
                 const checked = selected.includes(version.id)
                 const run = latestRun(version)
                 return (
@@ -207,7 +257,7 @@ export function VersionsPage() {
                       <span>{checked && <Check size={13} />}</span>
                     </label>
                     <div className="version-primary">
-                      <div><strong>{version.name}</strong><span className={`correctness ${version.correctness_status === 'passed' || version.correctness_status === 'valid' ? 'passed' : ''}`}>{version.correctness_status === 'passed' || version.correctness_status === 'valid' ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}{version.correctness_status}</span></div>
+                      <div><strong>{version.name}</strong><span className="language-badge">{languageLabel(version.language)}</span><span className={`correctness ${version.correctness_status === 'passed' || version.correctness_status === 'valid' ? 'passed' : ''}`}>{version.correctness_status === 'passed' || version.correctness_status === 'valid' ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}{version.correctness_status}</span></div>
                       <p>{version.notes || '没有备注'}</p>
                     </div>
                     <div className="version-metadata"><span>{formatDate(version.created_at)}</span><code>{shortHash(version.source_hash)}</code></div>
@@ -238,7 +288,7 @@ export function VersionsPage() {
                 {comparable ? <CheckCircle2 size={21} /> : <AlertTriangle size={21} />}
                 <div>
                   <strong>{comparable ? '可直接比较' : '不可直接比较'}</strong>
-                  <p>{comparable ? '题目修订、suite、输入规模、编译配置与环境指纹一致。' : `${reasons.join('；') || '版本口径不一致'}。不会生成误导性的统一排名或 speedup。`}</p>
+                  <p>{comparable ? '实现语言、题目修订、suite、输入规模、执行配置与环境指纹一致。' : `${reasons.join('；') || '版本口径不一致'}。不会生成误导性的统一排名或 speedup。`}</p>
                 </div>
                 {comparison && <span className={`environment-consistency ${comparison.environment_consistent ? 'ok' : ''}`}>{comparison.environment_consistent ? '环境一致' : '环境不一致'}</span>}
               </div>
@@ -298,7 +348,7 @@ export function VersionsPage() {
                     const flags = run?.compiler_flags ?? run?.compile_flags ?? version.compile_flags
                     const flagsText = Array.isArray(flags) ? flags.join(' ') : flags
                     const imageDigest = env?.container_digest ?? env?.image_digest
-                    return <div key={version.id}><strong>{version.name}</strong><dl><div><dt>题目修订</dt><dd>{version.problem_revision}</dd></div><div><dt>Suite</dt><dd><code>{shortHash(run?.suite_hash)}</code></dd></div><div><dt>协议版本</dt><dd>{run?.protocol_version ?? 'unavailable'}</dd></div><div><dt>编译配置</dt><dd title={flagsText}><code>{flagsText || 'unavailable'}</code></dd></div><div><dt>GPU</dt><dd>{env?.gpu_name ?? env?.gpu ?? 'unavailable'}</dd></div><div><dt>驱动</dt><dd>{env?.driver_version ?? 'unavailable'}</dd></div><div><dt>CUDA / NVCC</dt><dd>{env?.cuda_runtime_version ?? env?.cuda_version ?? '—'} / {env?.nvcc_version ?? '—'}</dd></div><div><dt>镜像摘要</dt><dd title={imageDigest}><code>{shortHash(imageDigest)}</code></dd></div><div><dt>环境指纹</dt><dd><code>{shortHash(run?.environment_fingerprint ?? env?.fingerprint)}</code></dd></div><div><dt>预热 / 样本</dt><dd>{run?.warmup ?? '—'} / {run?.iterations ?? '—'}</dd></div></dl></div>
+                    return <div key={version.id}><strong>{version.name}</strong><dl><div><dt>实现语言</dt><dd>{languageLabel(version.language)}</dd></div><div><dt>题目修订</dt><dd>{version.problem_revision}</dd></div><div><dt>Suite</dt><dd><code>{shortHash(run?.suite_hash)}</code></dd></div><div><dt>协议版本</dt><dd>{run?.protocol_version ?? 'unavailable'}</dd></div><div><dt>执行配置</dt><dd title={flagsText}><code>{flagsText || 'unavailable'}</code></dd></div><div><dt>GPU</dt><dd>{env?.gpu_name ?? env?.gpu ?? 'unavailable'}</dd></div><div><dt>驱动</dt><dd>{env?.driver_version ?? 'unavailable'}</dd></div><div><dt>工具链</dt><dd>{version.language === 'triton_python' ? `Triton ${String(env?.triton_version ?? '—')} / PyTorch ${String(env?.torch_version ?? '—')} / Python ${String(env?.python_version ?? '—')}` : `CUDA ${env?.cuda_runtime_version ?? env?.cuda_version ?? '—'} / NVCC ${env?.nvcc_version ?? '—'}`}</dd></div><div><dt>镜像摘要</dt><dd title={imageDigest}><code>{shortHash(imageDigest)}</code></dd></div><div><dt>环境指纹</dt><dd><code>{shortHash(run?.environment_fingerprint ?? env?.fingerprint)}</code></dd></div><div><dt>预热 / 样本</dt><dd>{run?.warmup ?? '—'} / {run?.iterations ?? '—'}</dd></div></dl></div>
                   })}
                 </div>
               </section>
@@ -312,7 +362,7 @@ export function VersionsPage() {
                     <label>修改后<select value={diffModified} onChange={(event) => setDiffModified(event.target.value)}>{selectedVersions.map((version) => <option value={version.id} key={version.id}>{version.name}</option>)}</select></label>
                   </div>
                 </header>
-                <div className="diff-space"><CodeDiff original={original?.source_code ?? ''} modified={modified?.source_code ?? ''} originalLabel={original?.name} modifiedLabel={modified?.name} /></div>
+                <div className="diff-space"><CodeDiff original={original?.source_code ?? ''} modified={modified?.source_code ?? ''} language={original?.language ?? language} originalLabel={original?.name} modifiedLabel={modified?.name} /></div>
               </section>
             </section>
           )}
@@ -347,7 +397,7 @@ export function VersionsPage() {
         onClose={() => setRetestOpen(false)}
         footer={<><button className="button ghost" type="button" onClick={() => setRetestOpen(false)}>取消</button><button className="button accent" type="button" onClick={() => void startRetest()}><Play size={15} />开始串行重测</button></>}
       >
-        <div className="retest-list">{selectedVersions.map((version) => <div key={version.id}><Check size={14} />{version.name}</div>)}</div>
+        <div className="retest-list">{selectedVersions.map((version) => <div key={version.id}><Check size={14} />{version.name} <span className="language-badge">{languageLabel(version.language)}</span></div>)}</div>
         <p className="modal-help">GPU Job 会严格串行。只有新测量成功时才追加 BenchmarkRun；不会创建新的 Version。</p>
       </Modal>
     </div>

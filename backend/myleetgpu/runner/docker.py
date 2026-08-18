@@ -22,9 +22,11 @@ from myleetgpu.runner.models import (
     CompileResult,
     EnvironmentProbe,
     ExecutionResult,
+    RunnerLanguage,
     RunnerUnavailable,
     RunnerUnhealthy,
 )
+from myleetgpu.runner.submission_policy import POLICY_VERSION
 
 RESULT_PREFIX = "MYLEETGPU_RESULT="
 CONTAINER_USER = "65534:65534"
@@ -33,6 +35,11 @@ CONTAINER_FILE_BYTES = 64 * 1024 * 1024
 RUNNER_LABEL = "com.myleetgpu.runner=true"
 INSTALLATION_LABEL_KEY = "com.myleetgpu.installation"
 OWNER_LABEL_KEY = "com.myleetgpu.owner"
+CUDA_CPP: RunnerLanguage = "cuda_cpp"
+TRITON_PYTHON: RunnerLanguage = "triton_python"
+TRITON_TMPFS = "/tmp:rw,nosuid,nodev,exec,size=512m"
+CUDA_TMPFS = "/tmp:rw,nosuid,nodev,noexec,size=64m"
+TRITON_POLICY_FILENAME = "submission_policy.py"
 
 
 def _safe_name(value: str) -> str:
@@ -44,10 +51,10 @@ class DockerRunner:
 
     def __init__(self, settings: Settings):
         self.settings = settings
-        self._cached_probe: tuple[float, EnvironmentProbe] | None = None
+        self._cached_probes: dict[RunnerLanguage, tuple[float, EnvironmentProbe]] = {}
         self._health_file = settings.data_dir / "runner-unhealthy.json"
         self._docker = os.environ.get("MYLEETGPU_DOCKER_BIN", "docker")
-        installation = stable_hash(str(settings.resolved_host_data_dir.resolve()))[:16]
+        installation = stable_hash(settings.host_data_mount)[:16]
         self._installation_label = f"{INSTALLATION_LABEL_KEY}={installation}"
         self._owner_label: str | None = None
 
@@ -84,8 +91,9 @@ class DockerRunner:
     ) -> EnvironmentProbe:
         if not ignore_circuit_breaker:
             self.assert_healthy()
-        if self._cached_probe and not force and time.monotonic() - self._cached_probe[0] < 60:
-            return self._cached_probe[1]
+        cached = self._cached_probes.get(CUDA_CPP)
+        if cached and not force and time.monotonic() - cached[0] < 60:
+            return cached[1]
 
         try:
             server = self._run_limited(
@@ -161,6 +169,11 @@ class DockerRunner:
                 cuda_arch=cuda_arch,
                 telemetry=telemetry,
                 fingerprint=stable_hash(fingerprint_payload),
+                backend=CUDA_CPP,
+                toolchain={
+                    "cuda_runtime_version": runtime_version,
+                    "nvcc_version": nvcc_line,
+                },
             )
         except (
             OSError,
@@ -189,26 +202,230 @@ class DockerRunner:
                 fingerprint=stable_hash(
                     {"healthy": False, "image": self.settings.cuda_image, "error": str(error)}
                 ),
+                backend=CUDA_CPP,
             )
-        self._cached_probe = (time.monotonic(), probe)
+        self._cached_probes[CUDA_CPP] = (time.monotonic(), probe)
         return probe
 
+    def probe_triton_environment(
+        self, *, force: bool = False, ignore_circuit_breaker: bool = False
+    ) -> EnvironmentProbe:
+        """Probe the optional Triton toolchain without mutating CUDA runner health."""
+
+        if not ignore_circuit_breaker:
+            self.assert_healthy()
+        cached = self._cached_probes.get(TRITON_PYTHON)
+        if cached and not force and time.monotonic() - cached[0] < 60:
+            return cached[1]
+
+        image = self.settings.triton_image
+        try:
+            server = self._run_limited(
+                [self._docker, "version", "--format", "{{.Server.Version}}"],
+                timeout=10,
+                limit=8192,
+            )
+            if server.returncode != 0 or not server.output.strip():
+                message = self._clean_output(server.output) or "Docker daemon unavailable"
+                raise RunnerUnavailable(message)
+            image_digest = self._inspect_image_digest(image)
+            gpu = self._docker_probe(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=name,driver_version,compute_cap",
+                    "--format=csv,noheader,nounits",
+                ],
+                gpu=True,
+                timeout=20,
+                image=image,
+                platform_owned=False,
+            )
+            if gpu.returncode != 0:
+                raise RunnerUnavailable(
+                    f"Triton GPU probe failed: {self._clean_output(gpu.output)}"
+                )
+            gpu_fields = [part.strip() for part in gpu.output.strip().splitlines()[0].split(",")]
+            if len(gpu_fields) != 3:
+                raise RunnerUnavailable("nvidia-smi returned an unexpected GPU description")
+            gpu_name, driver_version, compute_capability = gpu_fields
+
+            script = (
+                "import json,platform,torch,triton;"
+                "print(json.dumps({"
+                "'python_version':platform.python_version(),"
+                "'torch_version':torch.__version__,"
+                "'triton_version':triton.__version__,"
+                "'torch_cuda_version':torch.version.cuda,"
+                "'cuda_available':torch.cuda.is_available(),"
+                "'cuda_device_count':torch.cuda.device_count()}))"
+            )
+            versions = self._docker_probe(
+                ["python", "-I", "-B", "-c", script],
+                gpu=True,
+                timeout=30,
+                image=image,
+                platform_owned=False,
+            )
+            if versions.returncode != 0:
+                raise RunnerUnavailable(
+                    f"Triton toolchain probe failed: {self._clean_output(versions.output)}"
+                )
+            toolchain = json.loads(versions.output.strip())
+            required = {
+                "python_version",
+                "torch_version",
+                "triton_version",
+                "torch_cuda_version",
+            }
+            if not isinstance(toolchain, dict) or not required.issubset(toolchain):
+                raise RunnerUnavailable("Triton toolchain probe returned an unexpected payload")
+            if any(
+                not isinstance(toolchain[key], str) or not toolchain[key].strip()
+                for key in required
+            ):
+                raise RunnerUnavailable("Triton toolchain probe returned incomplete versions")
+            if toolchain.get("cuda_available") is not True:
+                raise RunnerUnavailable("PyTorch cannot access CUDA in the Triton runner image")
+            if toolchain.get("cuda_device_count") != 1:
+                raise RunnerUnavailable("Triton runner must expose exactly GPU 0")
+
+            configured = self.settings.cuda_arch
+            cuda_arch = compute_capability.replace(".", "") if configured == "auto" else configured
+            public_toolchain = {key: toolchain[key] for key in sorted(required)}
+            fingerprint_payload = {
+                "backend": TRITON_PYTHON,
+                "gpu": gpu_name,
+                "compute_capability": compute_capability,
+                "driver": driver_version,
+                "image": image_digest or image,
+                "arch": cuda_arch,
+                "toolchain": public_toolchain,
+            }
+            probe = EnvironmentProbe(
+                healthy=True,
+                gpu_name=gpu_name,
+                compute_capability=compute_capability,
+                driver_version=driver_version,
+                cuda_runtime_version=str(toolchain["torch_cuda_version"]),
+                nvcc_version=None,
+                cuda_image=image,
+                image_digest=image_digest,
+                cuda_arch=cuda_arch,
+                telemetry=self._probe_telemetry(image=image, platform_owned=False),
+                fingerprint=stable_hash(fingerprint_payload),
+                backend=TRITON_PYTHON,
+                toolchain=public_toolchain,
+            )
+        except (
+            OSError,
+            subprocess.SubprocessError,
+            ValueError,
+            TypeError,
+            IndexError,
+            KeyError,
+            RunnerUnavailable,
+        ) as error:
+            probe = EnvironmentProbe(
+                healthy=False,
+                gpu_name=None,
+                compute_capability=None,
+                driver_version=None,
+                cuda_runtime_version=None,
+                nvcc_version=None,
+                cuda_image=image,
+                image_digest=None,
+                cuda_arch=None,
+                telemetry={
+                    "temperature_c": None,
+                    "power_w": None,
+                    "sm_clock_mhz": None,
+                    "gpu_busy_percent": None,
+                },
+                error=str(error),
+                fingerprint=stable_hash(
+                    {
+                        "healthy": False,
+                        "backend": TRITON_PYTHON,
+                        "image": image,
+                        "error": str(error),
+                    }
+                ),
+                backend=TRITON_PYTHON,
+                toolchain={},
+            )
+        self._cached_probes[TRITON_PYTHON] = (time.monotonic(), probe)
+        return probe
+
+    @staticmethod
+    def _resolve_language(
+        language: RunnerLanguage | str | None,
+        *,
+        implementation: Any | None = None,
+        artifact: Path | None = None,
+    ) -> RunnerLanguage:
+        selected = language
+        if selected is None and implementation is not None:
+            selected = getattr(implementation, "language", None)
+        if selected is None and artifact is not None and artifact.suffix == ".py":
+            selected = TRITON_PYTHON
+        if selected is None:
+            selected = CUDA_CPP
+        normalized = str(getattr(selected, "value", selected))
+        if normalized not in {CUDA_CPP, TRITON_PYTHON}:
+            raise ValueError(f"unknown runner language: {normalized}")
+        return normalized  # type: ignore[return-value]
+
+    @staticmethod
+    def _harness_path(
+        problem: Problem,
+        implementation: Any | None,
+        harness_kind: str,
+    ) -> Path:
+        owner = implementation if implementation is not None else problem
+        attribute = "validator_path" if harness_kind == "validator" else "benchmark_path"
+        path = getattr(owner, attribute, None)
+        if not isinstance(path, Path) or not path.is_file():
+            raise ValueError(f"{attribute} is required for the selected implementation")
+        return path
+
     def prepare_compile(
-        self, task_root: Path, problem: Problem, source_path: Path, harness_kind: str
+        self,
+        task_root: Path,
+        problem: Problem,
+        source_path: Path,
+        harness_kind: str,
+        *,
+        language: RunnerLanguage | str | None = None,
+        implementation: Any | None = None,
     ) -> Path:
         if harness_kind not in {"validator", "benchmark"}:
             raise ValueError("unknown harness kind")
+        selected_language = self._resolve_language(language, implementation=implementation)
+        harness_path = self._harness_path(problem, implementation, harness_kind)
         compile_dir = task_root / f"compile-{harness_kind}"
         compile_dir.mkdir(parents=True, exist_ok=False)
+        if selected_language == TRITON_PYTHON:
+            source_target = compile_dir / "source.py"
+            harness_target = compile_dir / "platform.py"
+            policy_target = compile_dir / TRITON_POLICY_FILENAME
+            shutil.copyfile(source_path, source_target)
+            shutil.copyfile(harness_path, harness_target)
+            shutil.copyfile(Path(__file__).with_name(TRITON_POLICY_FILENAME), policy_target)
+            for path in (source_target, harness_target, policy_target):
+                ensure_mode(path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+            ensure_mode(compile_dir, 0o755)
+            return compile_dir
+
         source_target = compile_dir / "source.cu"
         header_target = compile_dir / "solve.h"
         harness_target = compile_dir / "platform.cu"
         shutil.copyfile(source_path, source_target)
-        shutil.copyfile(problem.header_path, header_target)
-        shutil.copyfile(
-            problem.validator_path if harness_kind == "validator" else problem.benchmark_path,
-            harness_target,
-        )
+        owner = implementation if implementation is not None else problem
+        header_path = getattr(owner, "header_path", None)
+        if not isinstance(header_path, Path) or not header_path.is_file():
+            raise ValueError("header_path is required for the CUDA C++ implementation")
+        shutil.copyfile(header_path, header_target)
+        shutil.copyfile(harness_path, harness_target)
         for path in (source_target, header_target, harness_target):
             ensure_mode(path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
         ensure_mode(compile_dir, 0o777)
@@ -221,18 +438,42 @@ class DockerRunner:
         source_path: Path,
         *,
         harness_kind: str = "validator",
+        language: RunnerLanguage | str | None = None,
+        implementation: Any | None = None,
     ) -> CompileResult:
+        selected_language = self._resolve_language(language, implementation=implementation)
+        if selected_language == TRITON_PYTHON:
+            return self._compile_triton(
+                task_root,
+                problem,
+                source_path,
+                harness_kind=harness_kind,
+                implementation=implementation,
+            )
+
         probe = self.probe_environment()
         if not probe.healthy or not probe.cuda_arch:
             raise RunnerUnavailable(probe.error or "CUDA environment is unavailable")
-        compile_dir = self.prepare_compile(task_root, problem, source_path, harness_kind)
+        compile_dir = self.prepare_compile(
+            task_root,
+            problem,
+            source_path,
+            harness_kind,
+            language=CUDA_CPP,
+            implementation=implementation,
+        )
         container_name = _safe_name(f"myleetgpu-{task_root.name}-compile-{harness_kind}")
         command = [
             *self._base_container_args(container_name, compile_dir, gpu=False),
             "--entrypoint",
             "nvcc",
             self.settings.cuda_image,
-            *self.effective_compile_flags(problem, probe),
+            *self.effective_compile_flags(
+                problem,
+                probe,
+                language=CUDA_CPP,
+                implementation=implementation,
+            ),
             "-I/work",
             "/work/source.cu",
             "/work/platform.cu",
@@ -261,11 +502,92 @@ class DockerRunner:
             output_limited=result.output_limited,
         )
 
+    def _compile_triton(
+        self,
+        task_root: Path,
+        problem: Problem,
+        source_path: Path,
+        *,
+        harness_kind: str,
+        implementation: Any | None,
+    ) -> CompileResult:
+        # Refuse Docker's implicit pull path. The optional runtime must be
+        # provisioned deliberately, and its absence must not trip CUDA health.
+        self._inspect_image_digest(self.settings.triton_image)
+        compile_dir = self.prepare_compile(
+            task_root,
+            problem,
+            source_path,
+            harness_kind,
+            language=TRITON_PYTHON,
+            implementation=implementation,
+        )
+        container_name = _safe_name(f"myleetgpu-{task_root.name}-compile-{harness_kind}-triton")
+        command = [
+            *self._base_container_args(
+                container_name,
+                compile_dir,
+                gpu=False,
+                language=TRITON_PYTHON,
+                read_only_workdir=True,
+            ),
+            "--entrypoint",
+            "python",
+            self.settings.triton_image,
+            "-I",
+            "-B",
+            f"/work/{TRITON_POLICY_FILENAME}",
+            "/work/source.py",
+        ]
+        timeout = min(
+            self.settings.compile_timeout_seconds,
+            problem.manifest.timeouts.compile_ms / 1000,
+        )
+        result = self._run_container(
+            command,
+            container_name,
+            timeout=timeout,
+            platform_owned=False,
+        )
+        diagnostics = self._clean_diagnostics(result.output, compile_dir)
+        artifact = compile_dir / "source.py"
+        succeeded = result.returncode == 0 and artifact.is_file()
+        return CompileResult(
+            succeeded=succeeded,
+            diagnostics=diagnostics,
+            executable=artifact if succeeded else None,
+            duration_seconds=result.duration_seconds,
+            timed_out=result.timed_out,
+            output_limited=result.output_limited,
+        )
+
     @staticmethod
-    def effective_compile_flags(problem: Problem, probe: EnvironmentProbe) -> list[str]:
+    def effective_compile_flags(
+        problem: Problem,
+        probe: EnvironmentProbe,
+        *,
+        language: RunnerLanguage | str | None = None,
+        implementation: Any | None = None,
+    ) -> list[str]:
+        selected_language = DockerRunner._resolve_language(language, implementation=implementation)
         if not probe.cuda_arch:
             raise RunnerUnavailable("CUDA architecture was not detected")
-        return [*problem.compile_flags, f"-arch=sm_{probe.cuda_arch}"]
+        if selected_language == TRITON_PYTHON:
+            toolchain = probe.toolchain
+            return [
+                f"backend={TRITON_PYTHON}",
+                f"policy={POLICY_VERSION}",
+                f"python={toolchain.get('python_version', 'unknown')}",
+                f"torch={toolchain.get('torch_version', 'unknown')}",
+                f"triton={toolchain.get('triton_version', 'unknown')}",
+                f"torch_cuda={toolchain.get('torch_cuda_version', 'unknown')}",
+                f"arch=sm_{probe.cuda_arch}",
+            ]
+        owner = implementation if implementation is not None else problem
+        compile_flags = getattr(owner, "compile_flags", None)
+        if not isinstance(compile_flags, list):
+            raise ValueError("compile_flags are required for the CUDA C++ implementation")
+        return [*compile_flags, f"-arch=sm_{probe.cuda_arch}"]
 
     def execute(
         self,
@@ -274,32 +596,69 @@ class DockerRunner:
         *,
         mode: str,
         timeout_seconds: float,
+        language: RunnerLanguage | str | None = None,
     ) -> ExecutionResult:
         if mode not in {"public", "full", "benchmark"}:
             raise ValueError("unknown execution mode")
+        selected_language = self._resolve_language(language, artifact=executable)
         self.assert_healthy()
         run_dir = task_root / f"run-{mode}"
         run_dir.mkdir(parents=True, exist_ok=False)
-        run_target = run_dir / "program"
-        shutil.copyfile(executable, run_target)
-        ensure_mode(run_target, 0o555)
+        if selected_language == TRITON_PYTHON:
+            run_target = run_dir / "source.py"
+            platform_source = executable.parent / "platform.py"
+            if not platform_source.is_file():
+                raise ValueError("compiled Triton artifact is missing platform.py")
+            platform_target = run_dir / "platform.py"
+            policy_source = executable.parent / TRITON_POLICY_FILENAME
+            if not policy_source.is_file():
+                raise ValueError("compiled Triton artifact is missing submission policy")
+            policy_target = run_dir / TRITON_POLICY_FILENAME
+            shutil.copyfile(executable, run_target)
+            shutil.copyfile(platform_source, platform_target)
+            shutil.copyfile(policy_source, policy_target)
+            ensure_mode(run_target, 0o444)
+            ensure_mode(platform_target, 0o444)
+            ensure_mode(policy_target, 0o444)
+        else:
+            run_target = run_dir / "program"
+            shutil.copyfile(executable, run_target)
+            ensure_mode(run_target, 0o555)
         # The bind mount is already readonly inside the submitted-code
         # container. Keep the host owner write bit so a non-root Worker can
         # unlink the executable when the job spool is cleaned.
         ensure_mode(run_dir, 0o755)
         container_name = _safe_name(f"myleetgpu-{task_root.name}-run-{mode}")
-        program_args: list[str] = []
-        if mode in {"public", "full"}:
-            program_args.extend(["--mode", mode])
-        command = [
-            *self._base_container_args(container_name, run_dir, gpu=True),
-            "--entrypoint",
-            "/work/program",
-            self.settings.cuda_image,
-            *program_args,
-        ]
+        if selected_language == TRITON_PYTHON:
+            command = [
+                *self._base_container_args(
+                    container_name,
+                    run_dir,
+                    gpu=True,
+                    language=TRITON_PYTHON,
+                ),
+                "--entrypoint",
+                "python",
+                self.settings.triton_image,
+                "-I",
+                "-B",
+                "/work/platform.py",
+                "--mode",
+                mode,
+            ]
+        else:
+            program_args: list[str] = []
+            if mode in {"public", "full"}:
+                program_args.extend(["--mode", mode])
+            command = [
+                *self._base_container_args(container_name, run_dir, gpu=True),
+                "--entrypoint",
+                "/work/program",
+                self.settings.cuda_image,
+                *program_args,
+            ]
         result = self._run_container(command, container_name, timeout=timeout_seconds)
-        output = self._clean_output(result.output)
+        output = self._clean_diagnostics(result.output, run_dir)
         parsed = self._parse_result(output)
         succeeded = (
             result.returncode == 0 and parsed is not None and parsed.get("status") == "passed"
@@ -354,8 +713,18 @@ class DockerRunner:
             self._run_limited([self._docker, "rm", "-f", *identifiers], timeout=20, limit=16_384)
         return identifiers
 
-    def _base_container_args(self, name: str, task_dir: Path, *, gpu: bool) -> list[str]:
+    def _base_container_args(
+        self,
+        name: str,
+        task_dir: Path,
+        *,
+        gpu: bool,
+        language: RunnerLanguage | str = CUDA_CPP,
+        read_only_workdir: bool | None = None,
+    ) -> list[str]:
+        selected_language = self._resolve_language(language)
         host_path = self._host_task_path(task_dir)
+        mount_read_only = gpu if read_only_workdir is None else read_only_workdir
         args = [
             self._docker,
             "run",
@@ -389,22 +758,40 @@ class DockerRunner:
             "--ulimit",
             f"fsize={CONTAINER_FILE_BYTES}:{CONTAINER_FILE_BYTES}",
             "--tmpfs",
-            "/tmp:rw,nosuid,nodev,noexec,size=64m",
-            "--env",
-            "HOME=/tmp",
-            "--env",
-            "CUDA_CACHE_DISABLE=1",
-            "--mount",
-            (
-                f"type=bind,src={host_path},dst={CONTAINER_WORKDIR},readonly"
-                if gpu
-                else f"type=bind,src={host_path},dst={CONTAINER_WORKDIR}"
-            ),
-            "--workdir",
-            CONTAINER_WORKDIR,
-            "--stop-timeout",
-            "1",
+            TRITON_TMPFS if selected_language == TRITON_PYTHON else CUDA_TMPFS,
         ]
+        environment = (
+            [
+                "HOME=/tmp",
+                "CUDA_VISIBLE_DEVICES=0",
+                "PYTHONHASHSEED=0",
+                "OMP_NUM_THREADS=1",
+                "MKL_NUM_THREADS=1",
+                "OPENBLAS_NUM_THREADS=1",
+                "TRITON_CACHE_DIR=/tmp/triton-cache",
+                "XDG_CACHE_HOME=/tmp/cache",
+                "PYTHONPYCACHEPREFIX=/tmp/pycache",
+                "TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor",
+            ]
+            if selected_language == TRITON_PYTHON
+            else ["HOME=/tmp", "CUDA_CACHE_DISABLE=1"]
+        )
+        for value in environment:
+            args.extend(["--env", value])
+        args.extend(
+            [
+                "--mount",
+                (
+                    f"type=bind,src={host_path},dst={CONTAINER_WORKDIR},readonly"
+                    if mount_read_only
+                    else f"type=bind,src={host_path},dst={CONTAINER_WORKDIR}"
+                ),
+                "--workdir",
+                CONTAINER_WORKDIR,
+                "--stop-timeout",
+                "1",
+            ]
+        )
         if self._owner_label is not None:
             args[args.index("--network") : args.index("--network")] = [
                 "--label",
@@ -420,13 +807,21 @@ class DockerRunner:
         if jobs_root not in resolved.parents:
             raise ValueError("container mount must be an exact child of the job spool")
         relative = resolved.relative_to(self.settings.data_dir.resolve())
-        host = (self.settings.resolved_host_data_dir / relative).resolve()
-        host_data = self.settings.resolved_host_data_dir
-        if host_data not in host.parents:
+        relative_text = relative.as_posix()
+        if relative.is_absolute() or ".." in relative.parts:
             raise ValueError("resolved host mount escaped the configured data directory")
-        return host.as_posix()
+        return f"{self.settings.host_data_mount}/{relative_text}"
 
-    def _docker_probe(self, command: Sequence[str], *, gpu: bool, timeout: float) -> CommandResult:
+    def _docker_probe(
+        self,
+        command: Sequence[str],
+        *,
+        gpu: bool,
+        timeout: float,
+        image: str | None = None,
+        platform_owned: bool = True,
+    ) -> CommandResult:
+        selected_image = image or self.settings.cuda_image
         name = _safe_name(f"myleetgpu-probe-{time.time_ns()}")
         args = [
             self._docker,
@@ -449,7 +844,7 @@ class DockerRunner:
             "--pids-limit",
             "64",
             "--memory",
-            "512m",
+            "1g" if selected_image == self.settings.triton_image else "512m",
         ]
         if self._owner_label is not None:
             args[args.index("--network") : args.index("--network")] = [
@@ -458,14 +853,38 @@ class DockerRunner:
             ]
         if gpu:
             args.extend(["--gpus", "device=0"])
-        args.extend(["--entrypoint", command[0], self.settings.cuda_image, *command[1:]])
+        args.extend(["--entrypoint", command[0], selected_image, *command[1:]])
         return self._run_container(
             args,
             name,
             timeout=timeout,
             limit=32_768,
-            platform_owned=True,
+            platform_owned=platform_owned,
         )
+
+    def _inspect_image_digest(self, image: str) -> str | None:
+        inspect = self._run_limited(
+            [
+                self._docker,
+                "image",
+                "inspect",
+                "--format",
+                "{{json .RepoDigests}}",
+                image,
+            ],
+            timeout=15,
+            limit=16_384,
+        )
+        if inspect.returncode != 0:
+            raise RunnerUnavailable(
+                f"fixed Triton image is unavailable: {self._clean_output(inspect.output)}"
+            )
+        digests = json.loads(inspect.output.strip() or "[]")
+        if isinstance(digests, list) and digests:
+            return str(digests[0])
+        if "@sha256:" in image:
+            return image
+        return None
 
     def _image_runtime_version(self) -> str | None:
         result = self._docker_probe(["cat", "/usr/local/cuda/version.json"], gpu=False, timeout=10)
@@ -479,7 +898,12 @@ class DockerRunner:
         except (ValueError, AttributeError):
             return None
 
-    def _probe_telemetry(self) -> dict[str, str | None]:
+    def _probe_telemetry(
+        self,
+        *,
+        image: str | None = None,
+        platform_owned: bool = True,
+    ) -> dict[str, str | None]:
         names = ["temperature_c", "power_w", "sm_clock_mhz", "gpu_busy_percent"]
         result = self._docker_probe(
             [
@@ -489,6 +913,8 @@ class DockerRunner:
             ],
             gpu=True,
             timeout=15,
+            image=image,
+            platform_owned=platform_owned,
         )
         if result.returncode != 0 or not result.output.strip():
             return dict.fromkeys(names)
@@ -618,6 +1044,11 @@ class DockerRunner:
             "/work/source.cu": "source.cu",
             "/work/platform.cu": "<platform>",
             "platform.cu": "<platform>",
+            "/work/source.py": "source.py",
+            "/work/platform.py": "<platform>",
+            "platform.py": "<platform>",
+            f"/work/{TRITON_POLICY_FILENAME}": "<platform-policy>",
+            TRITON_POLICY_FILENAME: "<platform-policy>",
         }
         for old, new in replacements.items():
             cleaned = cleaned.replace(old, new)

@@ -1,7 +1,7 @@
 import { AlertTriangle, Camera, CheckCircle2, Copy, LoaderCircle } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../api/client'
-import type { SavedVersion } from '../domain/types'
+import type { KernelLanguage, SavedVersion } from '../domain/types'
 import { sourceHash } from '../lib/hash'
 import { Modal } from './Modal'
 
@@ -9,12 +9,14 @@ export interface SaveVersionPayload {
   name: string
   notes: string
   source: string
+  language: KernelLanguage
   allowDuplicate: boolean
 }
 
 export function SaveVersionDialog({
   open,
   problemId,
+  language,
   snapshot,
   currentSource,
   existingVersions,
@@ -24,6 +26,7 @@ export function SaveVersionDialog({
 }: {
   open: boolean
   problemId: string
+  language: KernelLanguage
   snapshot: string
   currentSource: string
   existingVersions: SavedVersion[]
@@ -47,9 +50,9 @@ export function SaveVersionDialog({
     setChecking(true)
     void sourceHash(snapshot).then(async (nextHash) => {
       setHash(nextHash)
-      const local = existingVersions.filter((version) => version.source_hash === nextHash)
+      const local = existingVersions.filter((version) => version.language === language && version.source_hash === nextHash)
       try {
-        const remote = await api.versions.findDuplicates(problemId, nextHash)
+        const remote = await api.versions.findDuplicates(problemId, language, nextHash)
         const merged = [...local, ...remote].filter((version, index, all) => all.findIndex(({ id }) => id === version.id) === index)
         setDuplicates(merged)
       } catch {
@@ -58,7 +61,7 @@ export function SaveVersionDialog({
         setChecking(false)
       }
     })
-  }, [open, problemId, snapshot, existingVersions])
+  }, [open, problemId, language, snapshot, existingVersions])
 
   const isDuplicate = duplicates.length > 0
   const canSave = name.trim().length > 0 && !busy && !checking && (!isDuplicate || allowDuplicate)
@@ -75,7 +78,7 @@ export function SaveVersionDialog({
             className="button primary"
             type="button"
             disabled={!canSave}
-            onClick={() => onSave({ name: name.trim(), notes: notes.trim(), source: snapshot, allowDuplicate })}
+            onClick={() => onSave({ name: name.trim(), notes: notes.trim(), source: snapshot, language, allowDuplicate })}
           >
             {busy ? <LoaderCircle className="spin" size={16} /> : <CheckCircle2 size={16} />}
             {busy ? '正在提交…' : '验证、测速并保存'}
@@ -87,7 +90,7 @@ export function SaveVersionDialog({
         <Camera size={18} />
         <div>
           <strong>已锁定点击时的代码快照</strong>
-          <span>{snapshot.split('\n').length} 行 · SHA-256 {hash ? hash.slice(0, 12) : '计算中…'}</span>
+          <span>{language === 'triton_python' ? 'Triton (Python)' : 'CUDA C++'} · {snapshot.split('\n').length} 行 · SHA-256 {hash ? hash.slice(0, 12) : '计算中…'}</span>
         </div>
       </div>
       {currentSource !== snapshot && (

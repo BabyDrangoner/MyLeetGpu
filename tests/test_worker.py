@@ -31,6 +31,7 @@ class FakeRunner:
         self.full_execution_factory: Callable[[int], ExecutionResult] | None = None
         self.full_calls = 0
         self.last_problem: Problem | None = None
+        self.last_language = "cuda_cpp"
         self.owner: str | None = None
         self.cleaned_owned_containers = False
 
@@ -48,12 +49,18 @@ class FakeRunner:
         source_path: Path,
         *,
         harness_kind: str = "validator",
+        language: str = "cuda_cpp",
+        implementation: object | None = None,
     ) -> CompileResult:
-        self.calls.append(("compile", harness_kind, task_root, source_path))
+        self.calls.append(
+            ("compile", harness_kind, task_root, source_path, language, implementation)
+        )
         self.last_problem = problem
+        self.last_language = language
         if self.compile_failure is not None:
             return self.compile_failure
-        executable = task_root / f"fake-{harness_kind}-program"
+        suffix = ".py" if language == "triton_python" else ""
+        executable = task_root / f"fake-{harness_kind}-program{suffix}"
         executable.write_bytes(b"not executed by this CPU-only test double")
         return CompileResult(True, "fake nvcc ok", executable, 0.01)
 
@@ -64,8 +71,9 @@ class FakeRunner:
         *,
         mode: str,
         timeout_seconds: float,
+        language: str | None = None,
     ) -> ExecutionResult:
-        self.calls.append(("execute", mode, task_root, executable, timeout_seconds))
+        self.calls.append(("execute", mode, task_root, executable, timeout_seconds, language))
         if mode == "full":
             self.full_calls += 1
             if self.full_execution_factory is not None:
@@ -95,8 +103,20 @@ class FakeRunner:
         self.calls.append(("probe_environment", force))
         return make_probe("fake-runner-env")
 
+    def probe_triton_environment(self, *, force: bool = False):
+        self.calls.append(("probe_triton_environment", force))
+        return make_probe("fake-triton-env", backend="triton_python")
+
     @staticmethod
-    def effective_compile_flags(problem: Problem, probe: EnvironmentProbe) -> list[str]:
+    def effective_compile_flags(
+        problem: Problem,
+        probe: EnvironmentProbe,
+        *,
+        language: str = "cuda_cpp",
+        implementation: object | None = None,
+    ) -> list[str]:
+        if language == "triton_python":
+            return ["backend=triton_python", "triton=3.1.0", f"arch=sm_{probe.cuda_arch}"]
         return [*problem.compile_flags, f"-arch=sm_{probe.cuda_arch}"]
 
     def cleanup_task(self, task_root: Path) -> None:
@@ -217,6 +237,36 @@ def test_save_version_validates_then_benchmarks_then_persists_atomically(
         ("compile", "benchmark"),
         ("execute", "benchmark"),
     ]
+
+
+def test_triton_save_version_uses_python_backend_and_persists_language(
+    worker_bundle,
+) -> None:
+    _, repository, service, runner, worker = worker_bundle
+    source = "def solve(a, b, output, n):\n    output.copy_(a + b)\n"
+    submitted = service.submit(
+        problem_id="vector-addition",
+        language="triton_python",
+        action=JobAction.SAVE_VERSION,
+        source=source,
+        version_name="triton baseline",
+    )
+
+    assert worker.process_next()
+
+    completed = repository.get_job(submitted.id)
+    assert completed is not None and completed.status == "succeeded"
+    version = repository.get_version(completed.result_json["version_id"])  # type: ignore[index]
+    assert version is not None
+    assert version.language == "triton_python"
+    assert version.source_code == source
+    assert version.environment.backend == "triton_python"
+    assert version.compile_flags_json[0] == "backend=triton_python"
+    assert any(call[0] == "probe_triton_environment" for call in runner.calls)
+    compile_calls = [call for call in runner.calls if call[0] == "compile"]
+    assert all(call[4] == "triton_python" for call in compile_calls)
+    execute_calls = [call for call in runner.calls if call[0] == "execute"]
+    assert all(call[5] == "triton_python" for call in execute_calls)
 
 
 def test_compile_failure_does_not_execute_or_create_version(worker_bundle) -> None:
@@ -436,12 +486,14 @@ def test_unconfirmed_duplicate_created_during_benchmark_is_rechecked_before_save
         *,
         mode: str,
         timeout_seconds: float,
+        language: str | None = None,
     ) -> ExecutionResult:
         result = original_execute(
             task_root,
             executable,
             mode=mode,
             timeout_seconds=timeout_seconds,
+            language=language,
         )
         if mode == "benchmark":
             create_saved_version(

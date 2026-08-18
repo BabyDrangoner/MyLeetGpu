@@ -1,11 +1,25 @@
 export type Difficulty = '入门' | '简单' | '中等' | '困难' | string
 
+export type KernelLanguage = 'cuda_cpp' | 'triton_python'
+export type EditorLanguage = 'cpp' | 'python'
+
+export interface ProblemImplementation {
+  language: KernelLanguage
+  display_name: string
+  file_extension: '.cu' | '.py'
+  editor_language: EditorLanguage
+  starter_code: string
+  signature?: string
+  instructions_markdown?: string
+}
+
 export interface ProblemSummary {
   slug: string
   title: string
   difficulty: Difficulty
   revision: string
   summary: string
+  languages?: KernelLanguage[]
 }
 
 export interface BenchmarkProtocol {
@@ -20,6 +34,10 @@ export interface BenchmarkProtocol {
 
 export interface ProblemDetail extends ProblemSummary {
   statement_markdown: string
+  default_language: KernelLanguage
+  implementations: Partial<Record<KernelLanguage, ProblemImplementation>>
+  /** Default-implementation compatibility fields for older callers. */
+  language: KernelLanguage
   starter_code: string
   signature?: string
   constraints?: string[]
@@ -28,6 +46,7 @@ export interface ProblemDetail extends ProblemSummary {
 
 export interface Draft {
   problem_id: string
+  language: KernelLanguage
   source: string
   updated_at: string
 }
@@ -49,6 +68,7 @@ export interface TestCaseResult {
   name?: string
   passed?: boolean
   status?: string
+  backend?: KernelLanguage
   duration_ms?: number
   message?: string
   error_type?: string
@@ -80,6 +100,8 @@ export interface JobError {
 
 export interface Job {
   id: string
+  problem_id?: string
+  language: KernelLanguage
   status: JobStatus
   action: JobAction
   phase?: string
@@ -116,6 +138,9 @@ export interface EnvironmentSnapshot {
   cuda_runtime_version?: string
   cuda_version?: string
   nvcc_version?: string
+  python_version?: string
+  torch_version?: string
+  triton_version?: string
   container_image?: string
   container_digest?: string
   cuda_image?: string
@@ -126,6 +151,7 @@ export interface EnvironmentSnapshot {
   message?: string
   error?: string
   telemetry?: Record<string, string | null>
+  toolchain?: Record<string, string | null>
   [key: string]: unknown
 }
 
@@ -153,6 +179,7 @@ export interface SavedVersion {
   id: string
   problem_id: string
   problem_revision: string
+  language: KernelLanguage
   name: string
   notes?: string
   source_hash: string
@@ -180,6 +207,7 @@ export interface ComparisonResult {
   environment_consistent: boolean
   rows: ComparisonRow[]
   baseline_id: string
+  language?: KernelLanguage
   version_ids?: string[]
   environment?: EnvironmentSnapshot
 }

@@ -4,7 +4,7 @@ import { JobPanel } from './JobPanel'
 
 describe('JobPanel', () => {
   it('shows timeout as a distinct terminal state', () => {
-    render(<JobPanel job={{ id: 'job-timeout', action: 'run', status: 'timed_out', error: { message: '运行超过 5 秒' } }} />)
+    render(<JobPanel job={{ id: 'job-timeout', language: 'cuda_cpp', action: 'run', status: 'timed_out', error: { message: '运行超过 5 秒' } }} />)
     expect(screen.getByText('已超时')).toBeInTheDocument()
     expect(screen.getByText('运行超过 5 秒')).toBeInTheDocument()
   })
@@ -12,6 +12,7 @@ describe('JobPanel', () => {
   it('renders cleaned compiler diagnostics and per-case status', () => {
     render(<JobPanel job={{
       id: 'job-failed',
+      language: 'cuda_cpp',
       action: 'run',
       status: 'failed',
       diagnostics: 'solution.cu:12: error: expected ;',
@@ -20,5 +21,11 @@ describe('JobPanel', () => {
     expect(screen.getByText('样例 1')).toBeInTheDocument()
     expect(screen.getByText(/wrong_answer/)).toBeInTheDocument()
     expect(screen.getByText('solution.cu:12: error: expected ;')).toBeInTheDocument()
+  })
+
+  it('labels Triton diagnostics without calling them NVCC output', () => {
+    render(<JobPanel job={{ id: 'job-triton', language: 'triton_python', action: 'compile', status: 'failed', diagnostics: 'solution.py:4: SyntaxError' }} />)
+    expect(screen.getByText('Triton / Python 诊断')).toBeInTheDocument()
+    expect(screen.queryByText('NVCC 诊断')).not.toBeInTheDocument()
   })
 })

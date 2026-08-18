@@ -5,7 +5,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, Response, status
@@ -20,6 +20,7 @@ from myleetgpu.api.schemas import (
     DraftUpdate,
     JobCreate,
     JobResponse,
+    KernelLanguage,
     VersionUpdate,
 )
 from myleetgpu.application.compare import ComparisonError, compare_versions
@@ -148,7 +149,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 database_ok = connection.execute(text("SELECT 1")).scalar() == 1
         except Exception:
             database_ok = False
-        environment = repository.latest_environment()
+        environment = repository.latest_environment("cuda_cpp")
         worker_active = repository.has_active_lease(GPU_RESOURCE)
         circuit_error = _runner_circuit_error(request.app.state.settings)
         runner_ok = bool(
@@ -180,23 +181,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="题目不存在") from error
 
     @app.get("/api/drafts/{problem_id}")
-    def get_draft(problem_id: str, request: Request) -> dict[str, Any]:
-        _problem_or_404(request, problem_id)
-        record = _repository(request).get_draft(problem_id)
+    def get_draft(
+        problem_id: str,
+        request: Request,
+        language: Annotated[KernelLanguage, Query()] = "cuda_cpp",
+    ) -> dict[str, Any]:
+        _implementation_or_404(request, problem_id, language)
+        record = _repository(request).get_draft(problem_id, language)
         if record is None:
             raise HTTPException(status_code=404, detail="尚未保存草稿")
         return {
             "problem_id": record.problem_id,
+            "language": record.language,
             "source": record.source_code,
             "updated_at": record.updated_at,
         }
 
     @app.put("/api/drafts/{problem_id}")
     def put_draft(problem_id: str, body: DraftUpdate, request: Request) -> dict[str, Any]:
-        _problem_or_404(request, problem_id)
-        record = _repository(request).upsert_draft(problem_id, body.source)
+        _implementation_or_404(request, problem_id, body.language)
+        record = _repository(request).upsert_draft(problem_id, body.source, body.language)
         return {
             "problem_id": record.problem_id,
+            "language": record.language,
             "source": record.source_code,
             "updated_at": record.updated_at,
         }
@@ -214,13 +221,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _job_response(record)
 
     @app.get("/api/environment")
-    def environment(request: Request) -> dict[str, Any]:
-        record = _repository(request).latest_environment()
+    def environment(
+        request: Request,
+        language: Annotated[KernelLanguage, Query()] = "cuda_cpp",
+    ) -> dict[str, Any]:
+        record = _repository(request).latest_environment(language)
         if record is None:
             return {
                 "status": "unknown",
                 "healthy": False,
-                "error": "Worker 尚未完成环境探测",
+                "backend": language,
+                "error": "Worker 尚未完成该语言运行环境探测",
                 "telemetry": _unavailable_telemetry(),
             }
         payload = _environment_response(record)
@@ -234,23 +245,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return payload
 
     @app.get("/api/problems/{problem_id}/versions")
-    def list_versions(problem_id: str, request: Request) -> dict[str, Any]:
+    def list_versions(
+        problem_id: str,
+        request: Request,
+        language: Annotated[KernelLanguage | None, Query()] = None,
+    ) -> dict[str, Any]:
         _problem_or_404(request, problem_id)
-        items = [_version_response(item) for item in _repository(request).list_versions(problem_id)]
+        if language is not None:
+            _implementation_or_404(request, problem_id, language)
+        items = [
+            _version_response(item)
+            for item in _repository(request).list_versions(problem_id, language)
+        ]
         return {"items": items, "total": len(items)}
 
     @app.get("/api/versions/duplicates")
     def duplicate_versions(
         request: Request,
         problem_id: str = Query(min_length=1, max_length=128),
+        language: Annotated[KernelLanguage, Query()] = "cuda_cpp",
         source_hash_value: str | None = Query(default=None, alias="source_hash", min_length=64),
         source: str | None = Query(default=None, max_length=262_144),
     ) -> dict[str, Any]:
-        _problem_or_404(request, problem_id)
+        _implementation_or_404(request, problem_id, language)
         digest = source_hash_value or (source_hash(source) if source is not None else None)
         if digest is None:
             raise HTTPException(status_code=422, detail="source_hash 或 source 必填")
-        items = _repository(request).find_duplicate_versions(problem_id, digest)
+        items = _repository(request).find_duplicate_versions(problem_id, digest, language)
         return {
             "duplicate": bool(items),
             "items": [
@@ -304,11 +325,20 @@ def _problem_or_404(request: Request, slug: str) -> None:
         raise HTTPException(status_code=404, detail="题目不存在") from error
 
 
+def _implementation_or_404(request: Request, slug: str, language: str) -> Any:
+    try:
+        problem = request.app.state.catalog.get(slug)
+        return problem.get_implementation(language)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="题目或实现语言不存在") from error
+
+
 def _job_response(record: JobRecord) -> JobResponse:
     return JobResponse(
         id=record.id,
         problem_id=record.problem_id,
         problem_revision=record.problem_revision,
+        language=record.language,
         action=record.action,
         status=record.status,
         phase=record.phase,
@@ -328,6 +358,7 @@ def _version_response(record: VersionRecord) -> dict[str, Any]:
         "id": record.id,
         "problem_id": record.problem_id,
         "problem_revision": record.problem_revision,
+        "language": record.language,
         "name": record.name,
         "notes": record.notes,
         "source_code": record.source_code,
@@ -365,6 +396,7 @@ def _environment_response(record: EnvironmentSnapshotRecord) -> dict[str, Any]:
         "status": "healthy" if record.healthy else "unavailable",
         "healthy": record.healthy,
         "fingerprint": record.fingerprint,
+        "backend": record.backend,
         "gpu_name": record.gpu_name,
         "compute_capability": record.compute_capability,
         "driver_version": record.driver_version,
@@ -373,6 +405,7 @@ def _environment_response(record: EnvironmentSnapshotRecord) -> dict[str, Any]:
         "cuda_image": record.cuda_image,
         "image_digest": record.image_digest,
         "cuda_arch": record.cuda_arch,
+        "toolchain": record.toolchain_json,
         "telemetry": {**_unavailable_telemetry(), **record.telemetry_json},
         "error": record.error,
         "observed_at": record.observed_at,

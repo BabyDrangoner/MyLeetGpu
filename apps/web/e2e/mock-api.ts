@@ -12,6 +12,20 @@ void solve(const float* a, const float* b, float* output, int n, cudaStream_t st
 }
 `
 
+export const tritonStarterSource = `import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def add_kernel(a, b, output, n: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n
+    tl.store(output + offsets, tl.load(a + offsets, mask=mask) + tl.load(b + offsets, mask=mask), mask=mask)
+
+def solve(a: torch.Tensor, b: torch.Tensor, output: torch.Tensor, n: int) -> None:
+    add_kernel[(triton.cdiv(n, 256),)](a, b, output, n, BLOCK_SIZE=256)
+`
+
 const environment = {
   id: 'env-1',
   healthy: true,
@@ -22,6 +36,9 @@ const environment = {
   driver_version: '591.74',
   cuda_runtime_version: '12.6',
   nvcc_version: '12.6.85',
+  python_version: '3.11.10',
+  torch_version: '2.5.1+cu124',
+  triton_version: '3.2.0',
   cuda_image: 'nvidia/cuda:12.6.3-devel-ubuntu22.04',
   image_digest: 'sha256:e2e',
   observed_at: '2026-08-16T01:00:00Z',
@@ -29,15 +46,20 @@ const environment = {
 }
 
 const problems = [
-  { slug: 'vector-addition', title: '向量逐元素相加', difficulty: 'easy', revision: '1', summary: '实现高吞吐的逐元素相加。' },
-  { slug: 'matrix-transpose', title: '行主序矩阵转置', difficulty: 'medium', revision: '1', summary: '使用共享内存完成矩阵转置。' },
-  { slug: 'reduction', title: '单精度向量求和归约', difficulty: 'hard', revision: '1', summary: '实现稳定的并行归约。' },
+  { slug: 'vector-addition', title: '向量逐元素相加', difficulty: 'easy', revision: '1', summary: '实现高吞吐的逐元素相加。', languages: ['cuda_cpp', 'triton_python'] },
+  { slug: 'matrix-transpose', title: '行主序矩阵转置', difficulty: 'medium', revision: '1', summary: '使用共享内存完成矩阵转置。', languages: ['cuda_cpp', 'triton_python'] },
+  { slug: 'reduction', title: '单精度向量求和归约', difficulty: 'hard', revision: '1', summary: '实现稳定的并行归约。', languages: ['cuda_cpp', 'triton_python'] },
 ]
 
 function problemDetail(slug: string) {
   const summary = problems.find((item) => item.slug === slug) ?? problems[0]
   return {
     ...summary,
+    default_language: 'cuda_cpp',
+    implementations: {
+      cuda_cpp: { language: 'cuda_cpp', display_name: 'CUDA C++', source_suffix: '.cu', editor_language: 'cpp', starter_code: starterSource, signature: { symbol: 'solve', declaration: 'void solve(const float* a, const float* b, float* output, int n, cudaStream_t stream)' } },
+      triton_python: { language: 'triton_python', display_name: 'Triton (Python)', source_suffix: '.py', editor_language: 'python', starter_code: tritonStarterSource, signature: { symbol: 'solve', declaration: 'def solve(a: torch.Tensor, b: torch.Tensor, output: torch.Tensor, n: int) -> None' } },
+    },
     statement_markdown: '## 任务\n\n实现平台声明的 `solve` 接口。\n\n- 使用传入 stream\n- 不得越界访问',
     starter_code: starterSource,
     signature: { symbol: 'solve', declaration: 'void solve(const float* a, const float* b, float* output, int n, cudaStream_t stream)' },
@@ -46,23 +68,24 @@ function problemDetail(slug: string) {
   }
 }
 
-function savedVersion(id: string, name: string, medianScale: number, fingerprint = environment.fingerprint) {
+function savedVersion(id: string, name: string, medianScale: number, fingerprint = environment.fingerprint, language: 'cuda_cpp' | 'triton_python' = 'cuda_cpp') {
   return {
     id,
     problem_id: 'vector-addition',
     problem_revision: '1',
+    language,
     name,
     notes: id === 'v1' ? '直接加载实现' : '使用向量化访存',
     source_hash: id.repeat(64).slice(0, 64),
-    source_code: id === 'v1' ? starterSource : starterSource.replace('const int index', '// float4 path\n  const int index'),
+    source_code: language === 'triton_python' ? tritonStarterSource : id === 'v1' ? starterSource : starterSource.replace('const int index', '// float4 path\n  const int index'),
     created_at: '2026-08-16T01:00:00Z',
     correctness_status: 'passed',
-    compile_flags: ['--std=c++17', '-O3'],
+    compile_flags: language === 'triton_python' ? ['triton-autotune=off'] : ['--std=c++17', '-O3'],
     benchmark_runs: [{
       id: `run-${id}`,
       suite_hash: 'suite-e2e',
       protocol_version: '1',
-      compile_flags: ['--std=c++17', '-O3'],
+      compile_flags: language === 'triton_python' ? ['triton-autotune=off'] : ['--std=c++17', '-O3'],
       input_sizes: ['64K', '1M'],
       seed: 424242,
       warmup: 8,
@@ -83,36 +106,40 @@ export interface MockApiState {
   deleteConfirmed: boolean
 }
 
-export async function installMockApi(page: Page, options: { versions?: boolean; comparable?: boolean } = {}) {
+export async function installMockApi(page: Page, options: { versions?: boolean; comparable?: boolean; tritonVersion?: boolean } = {}) {
+  const initialVersions = options.versions ? [savedVersion('v1', '直接加载', 1), savedVersion('v2', '向量化 float4', 0.72, options.comparable === false ? 'different-env' : environment.fingerprint)] : []
+  if (options.tritonVersion) initialVersions.push(savedVersion('t1', 'Triton baseline', 0.9, environment.fingerprint, 'triton_python'))
   const state: MockApiState = {
-    versions: options.versions ? [savedVersion('v1', '直接加载', 1), savedVersion('v2', '向量化 float4', 0.72, options.comparable === false ? 'different-env' : environment.fingerprint)] : [],
+    versions: initialVersions,
     submittedJobs: [],
     deleteConfirmed: false,
   }
   const jobs = new Map<string, Record<string, unknown>>()
-  let draft = ''
+  const drafts = new Map<string, string>()
 
-  await page.route('http://127.0.0.1:3000/api/**', async (route: Route) => {
+  await page.route(/^https?:\/\/[^/]+\/api\/.*/, async (route: Route) => {
     const request = route.request()
     const url = new URL(request.url())
     const path = url.pathname
     const method = request.method()
     const fulfill = (payload: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: payload === undefined ? '' : JSON.stringify(payload) })
 
-    if (path === '/api/environment' && method === 'GET') return fulfill(environment)
+    if (path === '/api/environment' && method === 'GET') return fulfill({ ...environment, backend: url.searchParams.get('language') ?? 'cuda_cpp' })
     if (path === '/api/problems' && method === 'GET') return fulfill({ items: problems, total: problems.length })
     if (path.startsWith('/api/problems/') && path.endsWith('/versions') && method === 'GET') return fulfill({ items: state.versions, total: state.versions.length })
     if (path.startsWith('/api/problems/') && method === 'GET') return fulfill(problemDetail(decodeURIComponent(path.split('/').at(-1) ?? '')))
 
     if (path.startsWith('/api/drafts/') && method === 'GET') {
+      const language = url.searchParams.get('language') ?? 'cuda_cpp'
+      const draft = drafts.get(language) ?? ''
       return draft
-        ? fulfill({ problem_id: 'vector-addition', source: draft, updated_at: '2026-08-16T01:00:00Z' })
+        ? fulfill({ problem_id: 'vector-addition', language, source: draft, updated_at: '2026-08-16T01:00:00Z' })
         : fulfill({ detail: '尚未保存草稿' }, 404)
     }
     if (path.startsWith('/api/drafts/') && method === 'PUT') {
-      const body = request.postDataJSON() as { source: string }
-      draft = body.source
-      return fulfill({ problem_id: 'vector-addition', source: draft, updated_at: new Date().toISOString() })
+      const body = request.postDataJSON() as { language: string; source: string }
+      drafts.set(body.language, body.source)
+      return fulfill({ problem_id: 'vector-addition', language: body.language, source: body.source, updated_at: new Date().toISOString() })
     }
 
     if (path === '/api/versions/duplicates' && method === 'GET') return fulfill({ duplicate: false, items: [] })
@@ -158,18 +185,18 @@ export async function installMockApi(page: Page, options: { versions?: boolean; 
       state.submittedJobs.push(body)
       const id = `job-${state.submittedJobs.length}`
       jobs.set(id, body)
-      return fulfill({ id, problem_id: body.problem_id, action: body.action, status: 'queued', phase: 'queued', progress: 0 })
+      return fulfill({ id, problem_id: body.problem_id, language: body.language, action: body.action, status: 'queued', phase: 'queued', progress: 0 })
     }
     if (path.startsWith('/api/jobs/') && method === 'GET') {
       const id = path.split('/').at(-1) ?? ''
       const body = jobs.get(id) ?? {}
-      const base = { id, problem_id: 'vector-addition', action: body.action, progress: 1 }
-      if (body.action === 'compile') return fulfill({ ...base, status: 'failed', phase: 'compiling', error: { code: 'compile_error', message: 'NVCC 编译失败' }, diagnostics: 'solution.cu:7: error: expected a semicolon' })
+      const base = { id, problem_id: 'vector-addition', language: body.language, action: body.action, progress: 1 }
+      if (body.action === 'compile') return fulfill({ ...base, status: 'failed', phase: 'compiling', error: { code: 'compile_error', message: body.language === 'triton_python' ? 'Triton 编译检查失败' : 'NVCC 编译失败' }, diagnostics: body.language === 'triton_python' ? 'solution.py:7: SyntaxError' : 'solution.cu:7: error: expected a semicolon' })
       if (body.action === 'run') return fulfill({ ...base, status: 'timed_out', phase: 'public', error: { code: 'timeout', message: '公开样例运行超过限制' } })
       if (body.action === 'validate') return fulfill({ ...base, status: 'failed', phase: 'full', error: { code: 'wrong_answer', message: '结果与参考实现不一致', details: { correctness: { cases: [{ name: '公开样例 1', passed: false, message: '第 17 个元素不匹配', error_type: 'wrong_answer' }] } } } })
       if (body.action === 'save_version') {
         if (!state.versions.some((item) => item.id === 'saved-v3')) {
-          const created = savedVersion('saved-v3', String(body.version_name), 0.8)
+          const created = savedVersion('saved-v3', String(body.version_name), 0.8, environment.fingerprint, body.language === 'triton_python' ? 'triton_python' : 'cuda_cpp')
           created.source_code = String(body.source)
           state.versions.push(created)
         }

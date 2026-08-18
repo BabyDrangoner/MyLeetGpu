@@ -1,5 +1,9 @@
 import { defineConfig, devices } from '@playwright/test'
 
+// Keep route-mock E2E isolated from the real loopback/LAN service on :3000.
+const e2ePort = process.env.MYLEETGPU_E2E_PORT ?? '4173'
+const e2eBaseUrl = `http://127.0.0.1:${e2ePort}`
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: false,
@@ -9,7 +13,7 @@ export default defineConfig({
   workers: 1,
   reporter: [['line']],
   use: {
-    baseURL: 'http://127.0.0.1:3000',
+    baseURL: e2eBaseUrl,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     viewport: { width: 1440, height: 900 },
@@ -18,8 +22,8 @@ export default defineConfig({
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
   ],
   webServer: {
-    command: 'pnpm dev',
-    url: 'http://127.0.0.1:3000',
+    command: `pnpm exec vite --host 127.0.0.1 --port ${e2ePort}`,
+    url: e2eBaseUrl,
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
   },

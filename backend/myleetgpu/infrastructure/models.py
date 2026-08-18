@@ -4,7 +4,18 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from myleetgpu.infrastructure.database import Base
@@ -20,9 +31,15 @@ def uuid_string() -> str:
 
 class DraftRecord(Base):
     __tablename__ = "drafts"
+    __table_args__ = (
+        UniqueConstraint("problem_id", "language", name="uq_drafts_problem_language"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_string)
-    problem_id: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    problem_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    language: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="cuda_cpp", server_default="cuda_cpp"
+    )
     source_code: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
@@ -34,6 +51,9 @@ class EnvironmentSnapshotRecord(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_string)
     fingerprint: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    backend: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="cuda_cpp", server_default="cuda_cpp"
+    )
     healthy: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     gpu_name: Mapped[str | None] = mapped_column(String(256))
     compute_capability: Mapped[str | None] = mapped_column(String(16))
@@ -43,6 +63,7 @@ class EnvironmentSnapshotRecord(Base):
     cuda_image: Mapped[str] = mapped_column(String(512), nullable=False)
     image_digest: Mapped[str | None] = mapped_column(String(512))
     cuda_arch: Mapped[str | None] = mapped_column(String(16))
+    toolchain_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     telemetry_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
@@ -60,6 +81,9 @@ class JobRecord(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_string)
     problem_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     problem_revision: Mapped[str] = mapped_column(String(64), nullable=False)
+    language: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="cuda_cpp", server_default="cuda_cpp"
+    )
     action: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
     phase: Mapped[str] = mapped_column(String(64), nullable=False, default="queued")
@@ -94,6 +118,9 @@ class VersionRecord(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_string)
     problem_id: Mapped[str] = mapped_column(String(128), nullable=False)
     problem_revision: Mapped[str] = mapped_column(String(64), nullable=False)
+    language: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="cuda_cpp", server_default="cuda_cpp"
+    )
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
     source_code: Mapped[str] = mapped_column(Text, nullable=False)

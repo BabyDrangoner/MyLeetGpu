@@ -11,6 +11,7 @@ def make_probe(
     fingerprint: str = "env-a",
     *,
     healthy: bool = True,
+    backend: str = "cuda_cpp",
 ) -> EnvironmentProbe:
     return EnvironmentProbe(
         healthy=healthy,
@@ -30,6 +31,17 @@ def make_probe(
         },
         error=None if healthy else "probe failed",
         fingerprint=fingerprint,
+        backend=backend,
+        toolchain=(
+            {
+                "python_version": "3.11.10",
+                "torch_version": "2.5.1",
+                "triton_version": "3.1.0",
+                "torch_cuda_version": "12.4",
+            }
+            if backend == "triton_python"
+            else {}
+        ),
     )
 
 
@@ -48,8 +60,9 @@ def create_saved_version(
     sizes: Sequence[str] = ("64K", "1M"),
     medians: Sequence[float] = (4.0, 8.0),
     iterations: int = 3,
+    language: str = "cuda_cpp",
 ) -> VersionRecord:
-    environment = repository.save_environment(make_probe(environment_fingerprint))
+    environment = repository.save_environment(make_probe(environment_fingerprint, backend=language))
     measurements = [
         {
             "size": size,
@@ -84,6 +97,7 @@ def create_saved_version(
         iterations=iterations,
         measurements=measurements,
         raw_samples=raw_samples,
+        language=language,
     )
     loaded = repository.get_version(created.id)
     assert loaded is not None

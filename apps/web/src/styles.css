@@ -217,6 +217,10 @@ select:focus { border-color: rgba(146,120,255,.5); }
 .file-label { display: flex; gap: 7px; align-items: center; min-width: 0; color: #cbd2dd; font-size: 11px; }
 .file-label svg { color: var(--purple-bright); }
 .file-label span { padding-left: 7px; border-left: 1px solid var(--border); color: var(--subtle); font-size: 9px; }
+.language-switch { display: flex; gap: 2px; padding: 2px; margin-left: 13px; border: 1px solid var(--border); border-radius: 7px; background: #0b1016; }
+.language-switch button { min-height: 24px; padding: 0 8px; border: 0; border-radius: 5px; background: transparent; color: var(--subtle); cursor: pointer; font-size: 8.5px; }
+.language-switch button.active { background: var(--purple-soft); color: var(--purple-bright); }
+.language-switch button:disabled { cursor: not-allowed; opacity: .5; }
 .draft-state { display: flex; gap: 6px; align-items: center; margin-left: auto; margin-right: 9px; color: var(--subtle); font-size: 9.5px; }
 .editor-space { flex: 1; min-height: 0; background: #0d1118; }
 .test-code-editor { width: 100%; height: 100%; resize: none; border: 0; outline: 0; padding: 14px; background: #0d1118; color: #d8dee9; font: 13px/1.6 "JetBrains Mono", monospace; }
@@ -238,6 +242,7 @@ select:focus { border-color: rgba(146,120,255,.5); }
 .job-state.active { background: var(--purple-soft); color: var(--purple-bright); }
 .job-state.succeeded { background: var(--mint-soft); color: var(--mint); }
 .job-state.failed, .job-state.system_error, .job-state.timed_out, .job-state.cancelled { background: var(--red-soft); color: var(--red); }
+.job-language, .language-badge { display: inline-flex; align-items: center; padding: 3px 5px; border: 1px solid rgba(146,120,255,.2); border-radius: 5px; background: var(--purple-soft); color: #b5a7ee; font-size: 8px; white-space: nowrap; }
 .job-id { color: var(--subtle); font: 9px "JetBrains Mono", monospace; }
 .job-head .text-button { margin-left: auto; }
 .job-progress-block { margin-top: 11px; }
@@ -306,6 +311,8 @@ select:focus { border-color: rgba(146,120,255,.5); }
 .page-heading { align-items: flex-start; }
 .page-heading h1 { font-size: 26px; letter-spacing: -.7px; }
 .page-heading > div > p { max-width: 650px; }
+.environment-heading-actions { display: flex; gap: 9px; align-items: center; }
+.environment-heading-actions .language-switch { margin-left: 0; }
 .environment-hero { position: relative; display: flex; gap: 17px; align-items: center; min-height: 145px; padding: 24px 27px; overflow: hidden; border: 1px solid rgba(82,214,160,.2); border-radius: 14px; background: linear-gradient(120deg, rgba(82,214,160,.1), rgba(15,20,28,.75) 48%, rgba(146,120,255,.07)); box-shadow: var(--shadow); }
 .environment-hero.unhealthy { border-color: rgba(255,109,122,.23); background: linear-gradient(120deg, rgba(255,109,122,.09), rgba(15,20,28,.75)); }
 .environment-hero::after { content: ""; position: absolute; right: 60px; width: 260px; height: 260px; border: 1px solid rgba(82,214,160,.07); border-radius: 50%; box-shadow: 0 0 0 39px rgba(82,214,160,.018); }
@@ -342,6 +349,12 @@ select:focus { border-color: rgba(146,120,255,.5); }
 .versions-page { max-width: 1540px; }
 .versions-heading { align-items: flex-end; }
 .versions-heading .back-link { margin-bottom: 11px; }
+.version-language-tabs { display: flex; gap: 5px; align-items: center; padding: 5px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 9px; background: rgba(17,23,32,.65); }
+.version-language-tabs button { display: inline-flex; gap: 7px; align-items: center; min-height: 31px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; font-size: 9.5px; }
+.version-language-tabs button.active { background: var(--purple-soft); color: var(--purple-bright); }
+.version-language-tabs button:disabled { cursor: not-allowed; opacity: .5; }
+.version-language-tabs button span { min-width: 16px; padding: 2px 4px; border-radius: 8px; background: rgba(255,255,255,.06); color: var(--subtle); font: 8px "JetBrains Mono", monospace; text-align: center; }
+.version-language-tabs p { margin: 0 8px 0 auto; color: var(--subtle); font-size: 8.5px; }
 .version-picker { overflow: hidden; }
 .panel-heading { display: flex; align-items: center; justify-content: space-between; min-height: 59px; padding: 13px 16px; border-bottom: 1px solid var(--border); }
 .panel-heading h2 { display: flex; gap: 7px; align-items: center; font-size: 13px; }

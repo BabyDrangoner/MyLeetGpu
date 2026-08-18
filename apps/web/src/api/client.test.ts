@@ -28,25 +28,45 @@ describe('API contract adapter', () => {
     }))
     const problem = await api.problems.get('vector-addition')
     expect(problem.signature).toBe('void solve(float* output)')
+    expect(problem.default_language).toBe('cuda_cpp')
+    expect(problem.implementations.cuda_cpp?.starter_code).toBe('void solve() {}')
     expect(problem.constraints).toEqual(['n: min=1，max=1024', 'aliasing: none'])
     expect(problem.benchmark?.input_sizes).toEqual(['64K', '1M'])
+  })
+
+  it('normalizes CUDA C++ and Triton implementations without losing language metadata', async () => {
+    fetchMock.mockResolvedValue(json({
+      slug: 'vector-addition', title: '向量逐元素相加', difficulty: 'easy', revision: '2', summary: '双语言题目',
+      default_language: 'triton_python', statement_markdown: '# 题目',
+      implementations: {
+        cuda_cpp: { display_name: 'CUDA C++', file_extension: '.cu', editor_language: 'cpp', starter_code: '// cuda', signature: { declaration: 'void solve()' } },
+        triton_python: { display_name: 'Triton (Python)', source_suffix: '.py', editor_language: 'python', starter_code: '# triton', signature: { declaration: 'def solve(...)' } },
+      },
+    }))
+
+    const problem = await api.problems.get('vector-addition')
+    expect(problem.default_language).toBe('triton_python')
+    expect(problem.languages).toEqual(['cuda_cpp', 'triton_python'])
+    expect(problem.implementations.triton_python).toMatchObject({ editor_language: 'python', file_extension: '.py', starter_code: '# triton', signature: 'def solve(...)' })
   })
 
   it('normalizes jobs, environment snapshots and backend UTC timestamps', async () => {
     fetchMock
       .mockResolvedValueOnce(json({
-        id: 'job-1', action: 'run', status: 'running', phase: 'public', progress: 0.45,
+        id: 'job-1', language: 'triton_python', action: 'run', status: 'running', phase: 'public', progress: 0.45,
         created_at: '2026-08-16T01:00:00',
         result: { correctness: { status: 'passed', cases: [{ name: 'sample_1', passed: true }] }, output: 'ok' },
       }))
       .mockResolvedValueOnce(json({
         healthy: true, status: 'healthy', gpu_name: 'RTX 4060', cuda_image: 'cuda:12.6',
         image_digest: 'sha256:abc', observed_at: '2026-08-16T01:00:00',
+        backend: 'triton_python', toolchain: { python_version: '3.11.10', torch_version: '2.5.1+cu124', triton_version: '3.2.0' },
         telemetry: { temperature_c: null, power_w: '95' },
       }))
 
     const job = await api.jobs.get('job-1')
     expect(job.progress).toBe(45)
+    expect(job.language).toBe('triton_python')
     expect(job.result?.test_cases?.[0].name).toBe('sample_1')
     expect(job.result?.stdout).toBe('ok')
     expect(job.created_at).toBe('2026-08-16T01:00:00Z')
@@ -54,8 +74,36 @@ describe('API contract adapter', () => {
     const environment = await api.environment()
     expect(environment.container_image).toBe('cuda:12.6')
     expect(environment.container_digest).toBe('sha256:abc')
+    expect(environment.backend).toBe('triton_python')
+    expect(environment.python_version).toBe('3.11.10')
+    expect(environment.torch_version).toBe('2.5.1+cu124')
+    expect(environment.triton_version).toBe('3.2.0')
     expect(environment.unavailable_metrics).toEqual(['temperature_c'])
     expect(environment.checked_at).toBe('2026-08-16T01:00:00Z')
+  })
+
+  it('includes the implementation language in comparison requests', async () => {
+    fetchMock.mockResolvedValue(json({ comparable: true, environment_consistent: true, reasons: [], rows: [], baseline_id: 'v1' }))
+    await api.versions.compare('vector-addition', 'triton_python', ['v1', 'v2'], 'v1')
+    expect(fetchMock).toHaveBeenCalledWith('/api/versions/compare', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ problem_id: 'vector-addition', language: 'triton_python', version_ids: ['v1', 'v2'], baseline_id: 'v1' }),
+    }))
+  })
+
+  it('scopes draft and duplicate requests by implementation language', async () => {
+    fetchMock
+      .mockResolvedValueOnce(json({ problem_id: 'vector-addition', language: 'triton_python', source: '# draft', updated_at: '2026-08-16T01:00:00Z' }))
+      .mockResolvedValueOnce(json({ problem_id: 'vector-addition', language: 'triton_python', source: '# saved', updated_at: '2026-08-16T01:01:00Z' }))
+      .mockResolvedValueOnce(json({ items: [] }))
+
+    await api.drafts.get('vector-addition', 'triton_python')
+    await api.drafts.save('vector-addition', 'triton_python', '# saved')
+    await api.versions.findDuplicates('vector-addition', 'triton_python', 'a'.repeat(64))
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/drafts/vector-addition?language=triton_python', expect.any(Object))
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/drafts/vector-addition', expect.objectContaining({ method: 'PUT', body: JSON.stringify({ language: 'triton_python', source: '# saved' }) }))
+    expect(fetchMock).toHaveBeenNthCalledWith(3, expect.stringContaining('language=triton_python'), expect.any(Object))
   })
 
   it('sends the server-required second-confirmation flag when deleting', async () => {
@@ -66,7 +114,7 @@ describe('API contract adapter', () => {
 
   it('orders benchmark runs by creation time and id before selecting the latest run', async () => {
     fetchMock.mockResolvedValue(json({ items: [{
-      id: 'version-1', problem_id: 'vector-addition', problem_revision: '1', name: 'v1',
+      id: 'version-1', problem_id: 'vector-addition', problem_revision: '1', language: 'triton_python', name: 'v1',
       source_hash: 'abc', source_code: 'void solve() {}', created_at: '2026-08-16T01:00:00Z',
       correctness_status: 'passed',
       benchmark_runs: [
@@ -77,11 +125,12 @@ describe('API contract adapter', () => {
 
     const versions = await api.versions.list('vector-addition')
     expect(versions[0].benchmark_runs.at(-1)?.protocol_version).toBe('latest')
+    expect(versions[0].language).toBe('triton_python')
   })
 
   it('surfaces structured API error messages', async () => {
     fetchMock.mockResolvedValue(json({ error: { code: 'invalid_request', message: '版本名称必填' } }, 400))
-    await expect(api.jobs.create({ problem_id: 'vector-addition', action: 'save_version' })).rejects.toEqual(
+    await expect(api.jobs.create({ problem_id: 'vector-addition', language: 'cuda_cpp', action: 'save_version' })).rejects.toEqual(
       expect.objectContaining({ message: '版本名称必填', status: 400 } satisfies Partial<ApiError>),
     )
   })

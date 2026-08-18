@@ -2,7 +2,7 @@
 
 ## 1. 使用前必读
 
-MyLeetGpu 是供**单机可信操作者**使用的 CUDA C++ 练习与性能比较工具。它会用容器限制提交代码的文件、网络和进程权限，但 Docker 和 RTX 4060 等消费级 GPU 无法提供面向公网不可信租户的强 GPU/显存隔离。
+MyLeetGpu 是供**单机可信操作者**使用的 CUDA C++ / Triton (Python) Kernel 练习与性能比较工具。它会用容器限制提交代码的文件、网络和进程权限，但 Docker 和 RTX 4060 等消费级 GPU 无法提供面向公网不可信租户的强 GPU/显存隔离。
 
 - 默认只通过 `http://localhost:3000` 或 `http://127.0.0.1:3000` 访问。
 - 只有受信任的家庭/实验室局域网才可使用第 4.2 节的认证 LAN overlay；不要手改成 `0.0.0.0:3000`。
@@ -12,7 +12,7 @@ MyLeetGpu 是供**单机可信操作者**使用的 CUDA C++ 练习与性能比�
 
 直接运行 FastAPI 时默认监听 `127.0.0.1:8000`。Compose 中 API 为了让 Nginx 访问，会在项目网络内监听 `0.0.0.0:8000`，但**没有向宿主发布 8000**；这不是允许把 API 暴露到外部的例外。
 
-每次编译使用无 GPU 的一次性容器和当前 Job 的精确可写编译目录；每次运行/验证/benchmark 使用另一个一次性容器，只读挂载仅含最终可执行文件的目录，并只获得 GPU 0。两类容器均无网络、非 root、只读根文件系统、丢弃 capabilities、启用 `no-new-privileges`，并保留 Docker 默认内置 seccomp profile。
+CUDA 每次编译使用无 GPU 的一次性容器和当前 Job 的精确可写编译目录；Triton 的 Python 语法与 `restricted_triton_v1` 策略预检也使用无 GPU 容器，但 `/work` 只读。运行/验证/benchmark 使用另一个一次性容器，只读挂载该语言的最小 artifact，并只获得 GPU 0。两类容器均无网络、非 root、只读根文件系统、丢弃 capabilities、启用 `no-new-privileges`，并保留 Docker 默认内置 seccomp profile。Triton 因为必须 JIT，只在容器内获得 512 MiB 的临时可执行 `/tmp` 缓存；该缓存不持久化。
 
 项目没有 Debug 功能：不提供断点、单步、变量监视、cuda-gdb、Nsight、Profiler 或 PTX/汇编查看。编译错误、运行错误、错误答案、超时和受限 stdout/stderr 会正常显示。
 
@@ -22,7 +22,7 @@ MyLeetGpu 是供**单机可信操作者**使用的 CUDA C++ 练习与性能比�
 
 - Windows 10/11，已启用硬件虚拟化和 WSL2；发行版建议使用受支持的 Ubuntu LTS。
 - NVIDIA RTX 4060 或其他兼容 CUDA 的 NVIDIA GPU。RTX 4060 通常是 Compute Capability 8.9（`sm_89`），但 MyLeetGpu 以 `make doctor` 的实际探测为准，不依赖手工猜测。
-- 足够的磁盘空间用于固定 CUDA 镜像、构建缓存和本地数据。
+- 足够的磁盘空间用于固定 CUDA 镜像、固定 PyTorch/Triton devel 镜像、构建缓存和本地数据。
 
 在 **Windows PowerShell** 检查 WSL：
 
@@ -81,7 +81,9 @@ docker compose version
 docker info
 ```
 
-还需要 Git、GNU Make 和常用 shell 工具。仅用 Compose 启动时不要求宿主机自行安装 NVCC，CUDA 工具链来自固定的 `nvidia/cuda:12.4.1-devel-ubuntu22.04`。若要在宿主执行 `make lint`、`make test`、`make e2e`、`make clean-jobs` 或 `make recover-runner`，还需 Python 3.12+、Node.js 20+ 和项目 lockfile 对应的包管理器；运行 `make install` 安装锁定的开发依赖。
+还需要 Git、GNU Make 和常用 shell 工具。仅用 Compose 启动时不要求宿主机自行安装 NVCC、PyTorch 或 Triton：CUDA 工具链来自固定的 `nvidia/cuda:12.4.1-devel-ubuntu22.04`；Triton 工具链来自固定的官方 `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel@sha256:14611869895df612b7b07227d5925f30ec3cd6673bad58ce3d84ed107950e014`，当前实际包含 Python 3.11.10、PyTorch 2.5.1 + CUDA 12.4 和 Triton 3.1.0。若要在宿主执行 `make lint`、`make test`、`make e2e`、`make clean-jobs` 或 `make recover-runner`，还需 Python 3.12+、Node.js 20+ 和项目 lockfile 对应的包管理器；运行 `make install` 安装锁定的开发依赖。宿主开发 Python 与 Triton Runner 内的 Python 版本是两个独立环境。
+
+项目使用镜像内随 PyTorch 固定的 Triton，不支持在提交中安装包，也不建议进入 Worker/API 容器执行 `pip install`。学习语言与核对上游兼容性时，请使用 [Triton 官方安装说明](https://triton-lang.org/main/getting-started/installation.html)、[Triton Vector Addition 教程](https://triton-lang.org/main/getting-started/tutorials/01-vector-add.html) 和 [PyTorch 官方版本页](https://docs.pytorch.org/get-started/previous-versions/)。
 
 ## 3. 安装与环境诊断
 
@@ -110,8 +112,10 @@ make install
 - 固定的 `nvidia/cuda:12.4.1-devel-ubuntu22.04` 容器是否能看到目标 GPU；
 - 最小 `.cu` 程序能否在容器中用 NVCC 编译并在 GPU 上运行；
 - GPU 型号、Compute Capability、驱动、CUDA Runtime、NVCC 版本和镜像 RepoDigest。
+- 固定 PyTorch/Triton 镜像能否加载 Python、PyTorch 和 Triton，是否只看到 GPU 0；
+- 最小 Triton Kernel 能否在真实 GPU 上完成 JIT 并运行，以及 Python/PyTorch/Triton/Torch CUDA 版本和镜像 RepoDigest。
 
-看到 `RTX 4060` 和实际探测的 Compute Capability 后再继续。doctor 的 GPU 编译/运行失败就表示 GPU 验收未通过，不能用 mock 或宿主机 `nvidia-smi` 成功替代。
+看到 `RTX 4060` 和实际探测的 Compute Capability 后再继续。doctor 的 CUDA 或 Triton GPU 编译/JIT/运行失败就表示对应语言的 GPU 验收未通过，不能用 mock 或宿主机 `nvidia-smi` 成功替代。
 
 ## 4. 启动、检查和停止
 
@@ -121,7 +125,7 @@ make install
 make start
 ```
 
-`make start` 创建 `data/jobs/`、构建前后端，然后先运行一次性 `migrate` 服务执行 `alembic upgrade head`。Make 会把当前 WSL 用户 UID/GID 和 Docker socket GID 传给 Compose，使 Linux 文件系统中的 `./data` 可由 migrate、API 和 Worker 以同一身份写入。只有 migration 成功退出，API 和单 Worker 才启动；Worker 随后探测固定 CUDA 镜像、读取实际 RepoDigest 并保存环境快照。首次运行前的 `make doctor` 会在缺少镜像时拉取它。
+`make start` 创建 `data/jobs/`、构建前后端，然后先运行一次性 `migrate` 服务执行 `alembic upgrade head`。Make 会把当前 WSL 用户 UID/GID 和 Docker socket GID 传给 Compose，使 Linux 文件系统中的 `./data` 可由 migrate、API 和 Worker 以同一身份写入。只有 migration 成功退出，API 和单 Worker 才启动；Worker 随后探测固定 CUDA 镜像、读取实际 RepoDigest 并保存 CUDA 环境快照。Triton 环境在 Triton 工作流中独立按需探测，不影响 CUDA readiness；保存 Triton 性能版本或统一重测时会持久化对应环境快照。首次运行前的 `make doctor` 会在缺少镜像时拉取两种固定 Runner 镜像并实测两条 GPU 路径。
 
 就绪后，在 Windows 浏览器访问：
 
@@ -137,6 +141,8 @@ curl --fail http://127.0.0.1:3000/api/ready
 ```
 
 `health` 成功只说明 API 进程存活；`ready` 检查数据库、非空题目注册表、最近一次健康环境快照、`gpu:0` Worker 活跃租约和熔断标记。Worker 尚未完成首次探测/获取租约时短暂返回 503 是正常的；持续 503 时根据 `worker_active` 和 `runner_error` 处理。
+
+环境页可切换 `CUDA C++` 与 `Triton (Python)`。CUDA 页显示 GPU、驱动、CUDA Runtime、NVCC、架构和 CUDA 镜像摘要；Triton 页显示 GPU、驱动、Python/PyTorch/Triton、Torch CUDA Runtime、架构和 PyTorch 镜像摘要。`/api/ready` 以基础 CUDA Runner 和共享 GPU/Worker 状态为准；Triton 工具链是独立能力，尚无已保存的 Triton 环境快照时环境页可显示 unknown，而 Triton 镜像/JIT 故障只应使 Triton Job 失败。先用 `make doctor` 验证两种语言，不要仅凭总 readiness 推断 Triton 已可用。
 
 验证主机没有对外监听：
 
@@ -214,26 +220,30 @@ make stop
 
 ### 5.1 选择题目与编辑代码
 
-1. 在题目列表选择 Vector Addition、Matrix Transpose、Reduction 或其他已安装题目。
-2. 阅读函数签名、约束和浮点容差。只实现 starter 要求的 `solve` 接口；不要自行提供 `main`。
-3. 在 Monaco Editor 中编辑 CUDA C++。编辑器会自动保存当前题目的草稿。
-4. “重置代码”会把当前编辑内容恢复为该 revision 的 starter；确认前检查是否仍需要未保存修改。
+1. 在题目列表选择 Vector Addition、Matrix Transpose、Reduction 或其他已安装题目。当前三道内置题均提供 CUDA C++ 与 Triton (Python) starter。
+2. 用编辑器顶部的语言切换器选择实现。URL 会保留 `language=cuda_cpp` 或 `language=triton_python`，刷新和进入性能页时仍能回到同一语言。
+3. 阅读当前语言的函数签名、补充说明、约束和浮点容差，只实现 starter 要求的 `solve` 接口。CUDA 不要自行提供 `main`；Triton 可以定义多个 `@triton.jit` Kernel，但必须保留可调用的 Python `solve(...)` 并遵守题面列出的受限语法。
+4. 在 Monaco Editor 中编辑 `.cu` 或 `.py`。编辑器会分别保存当前题目、当前语言的草稿。
+5. “重置代码”只会把当前语言的编辑内容恢复为该 revision 的 starter；确认前检查是否仍需要未保存修改。
 
-草稿自动保存只是工作区恢复机制，不是性能版本。页面刷新或切换题目后，草稿应恢复；网络失败时浏览器保留本地回退副本。当前服务端草稿按题目 upsert，采用后写覆盖，不提供多标签页冲突合并。
+Triton `solve` 接收 GPU 0 上连续存放的 `torch.float32` Tensor 和题目声明的标量参数。平台已经进入受控的 `torch.cuda.stream(stream)` 上下文；直接把 Kernel launch 到当前 stream，写入平台提供的输出 Tensor，并返回 `None`。`solve` 只能做字面量/标量 launch 参数计算、`triton.cdiv`、当前文件 JIT Kernel launch，以及 Reduction 题明确允许的 `output.zero_()`；不要把 Tensor 移到 CPU、替换输出、调用设备级同步或依赖默认 stream。每道题的 Triton 补充说明会显示准确签名和白名单边界。
+
+草稿自动保存只是工作区恢复机制，不是性能版本。页面刷新、切换题目或切换语言后，对应草稿应恢复；网络失败时浏览器保留按语言隔离的本地回退副本。当前服务端草稿按 `(problem_id, language)` upsert，采用后写覆盖，不提供同一题同一语言的多标签页冲突合并。CUDA 与 Triton 草稿不会互相覆盖。
 
 ### 5.2 编译
 
-点击“编译”只运行 NVCC：
+点击“编译”只执行当前语言的无 GPU 预检查：
 
-- 成功时显示编译成功；临时二进制随后清理。
+- CUDA C++ 会运行 NVCC 并链接当前操作的可信 harness；成功后临时二进制随后清理。
+- Triton (Python) 检查 `source.py` 的 Python 语法和 `restricted_triton_v1` AST 白名单，再在隔离 globals 中加载安全定义并确认 `solve` 存在；不会调用 `solve` 或触发 GPU JIT。
 - 失败时显示用户源码中的行列号和经过路径清理、长度限制的诊断。
 - 不执行样例，不生成 benchmark，不创建性能版本。
 
-无论重复编译多少次，性能版本数量都不会增加。
+Triton Kernel 需要真实 Tensor、dtype 和 `tl.constexpr`/meta 参数才能完成对应专化；首次 GPU 调用发生在“运行”“验证”或保存流程中。因此 Triton 预检显示成功后，第一次运行仍可能报告 JIT 编译错误，这是预期的两阶段语义。无论重复编译多少次，性能版本数量都不会增加。
 
 ### 5.3 运行公开样例
 
-点击“运行”会重新编译，然后执行题面公开的样例：
+点击“运行”会重新执行当前语言的预检查/编译，然后执行题面公开的样例。Triton 在此时通过同一版本化策略把受限定义加载到独立 module globals、校验 `solve` 精确参数，并在第一次 GPU 调用完成 JIT 专化：
 
 - 输出面板按公开用例显示 pass/fail；
 - 可能显示编译错误、运行错误、CUDA error、输出超限或超时；
@@ -242,7 +252,7 @@ make stop
 
 ### 5.4 完整验证
 
-点击“验证”会重新编译，并执行公开测试、边界测试和固定种子的内部测试。整数结果精确比较；浮点按题目给出的 `atol`/`rtol` 比较，并检查 NaN/Inf。
+点击“验证”会重新执行当前语言的预检查/编译，并执行公开测试、边界测试和固定种子的内部测试。整数结果精确比较；浮点按题目给出的 `atol`/`rtol` 比较，并检查 NaN/Inf。
 
 内部测试失败时只显示安全摘要，不显示内部输入、参考输出或 harness 路径。验证成功也不会创建性能版本。
 
@@ -261,29 +271,29 @@ queued → compiling → running / validating / benchmarking → succeeded
 只有“保存为性能版本”会创建持久 Version：
 
 1. 点击按钮后填写版本名称，备注可选。
-2. 系统立即冻结点击时的完整源码快照；随后继续编辑不会改变这个候选版本。
+2. 系统立即冻结点击时的实现语言和完整源码快照；随后继续编辑或切换语言不会改变这个候选版本。
 3. 系统重新编译并执行完整正确性验证。
 4. 验证通过后，按固定协议运行 benchmark。
 5. 两步均成功后，先保存环境快照，再在一个事务中同时创建 Version 与首次 BenchmarkRun；随后 Job 才标为成功。
 
-如果编译、验证、benchmark、GPU、Docker 或版本事务任一步失败，Version 数量保持不变；此前的环境探测快照可能保留。相同源码 hash 已经保存过时，界面会先调用 duplicate 查询并要求用户确认；服务端也会在入队、Worker 开始及提交前复查。确认请求携带 `allow_duplicate=true` 后仍可保存，例如为同一源码保留不同的语义备注。
+如果编译、验证、benchmark、GPU、Docker 或版本事务任一步失败，Version 数量保持不变；此前的环境探测快照可能保留。同一题、同一语言下相同源码 hash 已经保存过时，界面会先调用 duplicate 查询并要求用户确认；服务端也会在入队、Worker 开始及提交前复查。确认请求携带 `allow_duplicate=true` 后仍可保存，例如为同一源码保留不同的语义备注。CUDA 与 Triton 源码不互相判为重复。
 
 保存后：
 
-- 源码、problem revision 和测量上下文不可变；
+- 实现语言、源码、problem revision 和测量上下文不可变；
 - 可以修改名称和备注；
 - 删除需要 UI 二次确认；实际请求为 `DELETE /api/versions/{version_id}?confirmed=true`，缺少确认参数会返回 409，成功后关联 benchmark 级联删除；
 - 刷新页面或重启服务后仍然存在。
 
 ## 7. 比较和重新测试版本
 
-1. 进入同一题目的版本列表，选择 2 至 8 个唯一版本。
+1. 进入同一题目的版本列表，先选择 CUDA C++ 或 Triton (Python) 标签，再在该语言内选择 2 至 8 个唯一版本。
 2. 指定其中一个为 baseline。
 3. 查看每个输入规模的 median、p95、波动指标、样本数和 speedup。
 4. 检查环境/协议栏的“可直接比较”状态和差异列表。
 5. 使用代码快照或 Diff 查看实现差异。
 
-环境/协议栏应能看到 GPU、驱动、CUDA Runtime、NVCC、编译 flags、镜像 digest、suite hash 和协议版本；缺字段本身也是需要谨慎解释的信号。
+环境/协议栏应能看到实现语言、GPU、驱动、语言工具链、执行配置、镜像 digest、suite hash 和协议版本：CUDA 展示 CUDA Runtime/NVCC/flags，Triton 展示 Python/PyTorch/Triton/Torch CUDA/目标架构。缺字段本身也是需要谨慎解释的信号。
 
 候选 X 相对 baseline B 的加速比为：
 
@@ -293,9 +303,9 @@ speedup(X) = median(B) / median(X)
 
 `1.20x` 表示候选的 median 耗时约为 baseline 的 `1 / 1.20`；小于 `1.0x` 表示更慢。
 
-只有 problem revision、suite hash、输入规模/随机种子/采样协议、编译配置和完整环境指纹一致，结果才会标为“可直接比较”。任一项不同都会显示“不可直接比较”，此时可以并排看历史值，但系统不会生成统一排名或误导性的总 speedup。
+系统在 API 和 UI 两层拒绝混合实现语言的比较：即使 CUDA C++ 与 Triton 使用同一块 GPU、相同题目规模，也不会生成跨语言 speedup。只有同语言版本的 problem revision、suite hash、输入规模/随机种子/采样协议、执行配置和完整环境指纹一致，结果才会标为“可直接比较”。任一项不同都会显示“不可直接比较”，此时可以并排看历史值，但系统不会生成统一排名或误导性的总 speedup。
 
-选择“使用当前统一环境重新测试所选版本”时，可提交同题的 1 至 8 个唯一版本。系统先在单 GPU 上**串行完成全部版本的完整验证**；只有全部通过，才进入第二阶段，串行 benchmark 全部版本。测量结果暂不逐条入库，全部成功后用一个事务批量追加 BenchmarkRun。任一版本验证、测量或提交失败，本批次不会向任何所选版本追加 BenchmarkRun。重测不创建 Version，也不修改源码、名称或备注。
+选择“使用当前统一环境重新测试所选版本”时，可提交同题、同语言的 1 至 8 个唯一版本；混合语言请求会被拒绝。系统先在单 GPU 上**串行完成全部版本的完整验证**；只有全部通过，才进入第二阶段，串行 benchmark 全部版本。测量结果暂不逐条入库，全部成功后用一个事务批量追加 BenchmarkRun。任一版本验证、测量或提交失败，本批次不会向任何所选版本追加 BenchmarkRun。重测不创建 Version，也不修改语言、源码、名称或备注。
 
 ## 8. Benchmark 指标如何解读
 
@@ -306,7 +316,7 @@ speedup(X) = median(B) / median(X)
 - **MAD**：样本相对中位数偏差的中位数，是更抗异常值的波动指标。
 - **样本数**：实际纳入统计的采样数量；不足配置数量时，本次 benchmark 应失败而不是悄悄改变口径。
 
-平台使用同一 CUDA stream 上的 CUDA Events 计时，并先 warmup。极短 kernel 会使用 inner repetitions。正式耗时排除 NVCC 编译、容器启动、CUDA context 初始化、输入生成、内存分配和 H2D/D2H 拷贝；用户在 stdout 打印的时间完全不采信。
+两种实现语言都由平台在同一受控 CUDA stream 上使用 CUDA Events 计时，并先 warmup。极短 Kernel 会使用 inner repetitions。正式耗时排除 NVCC/Triton 策略预检、Triton 首次 JIT 专化、容器启动、CUDA context 初始化、输入生成、内存分配和 H2D/D2H 拷贝；用户打印在 Triton 策略中被拒绝，CUDA stdout 中自报的时间也完全不采信。
 
 结果仍会受到 GPU 温度、时钟、功耗限制、Windows 桌面图形和后台 GPU 工作影响。比较前尽量：
 
@@ -410,7 +420,7 @@ make e2e
 
 - 更新 Docker Desktop 和 Windows NVIDIA 驱动，更新 WSL 内核并重启 WSL；
 - 若使用独立 Docker Engine，安装/配置与该 daemon 对应的 NVIDIA Container Toolkit，然后按官方步骤重启 daemon；
-- 使用项目 doctor 所用的固定 CUDA 镜像验证 GPU，避免拿另一个镜像成功来替代；
+- 使用项目 doctor 所用的固定 CUDA 与 PyTorch/Triton 镜像分别验证 GPU，避免拿另一个镜像成功来替代；
 - 不要传入 `seccomp=unconfined` 来绕过 Docker 默认启用的内置 seccomp 隔离；
 - 若涉及驱动、Toolkit 或服务的管理员级修改，停止项目操作并在系统层完成后再重试。
 
@@ -426,18 +436,35 @@ make e2e
 
 如果诊断只有 `system_error` 而不是 `compile_error`，请记录 Job ID 并查看 Worker 日志；不要修改 Docker Runner 去执行任意 shell 命令。
 
-### 11.7 运行错误、错误答案、超时或输出超限
+### 11.7 Triton 镜像或工具链不可用
+
+现象：环境页的 Triton 标签显示 unknown/unavailable，Job 报 `fixed Triton image is unavailable`，或 Python 无法 import `torch` / `triton`。
+
+1. 运行 `make doctor`；它会拉取并检查项目固定的官方 PyTorch 2.5.1 CUDA 12.4 devel digest，输出实际镜像摘要、Python/PyTorch/Triton/Torch CUDA 版本，并在 GPU 0 上 JIT 运行最小 Triton Kernel。
+2. 拉取失败时检查 Docker daemon、代理/网络、磁盘空间和镜像仓库访问；保留原始 doctor 输出。
+3. 工具链版本不符合 Python 3.11 / PyTorch 2.5.1 + CUDA 12.4 / Triton 3.1 时，检查 `.env` 的 `TRITON_IMAGE` 是否仍是仓库默认固定 digest，然后重新运行 doctor 和 `make start`。
+4. 不要用提交代码联网安装包，不要在 API/Worker 容器中临时 `pip install`，也不要用随机本地镜像冒充验收通过；这些做法会破坏环境指纹和可复现性。
+
+CUDA readiness 与 Triton 工具链探测独立。Triton 镜像缺失不表示 CUDA C++ 一定不可用；反过来，总体 `/api/ready` 为 ready 也不等于 Triton 已通过实机 JIT 探针。
+
+### 11.8 Triton 预检通过，但运行/JIT 失败
+
+“编译”会完成 Python 语法、受限 AST、精确 import/调用白名单、安全定义加载和 `solve` 存在性检查。非白名单 import、反射、文件/网络/进程/线程、打印、dunder、动态执行、设备打印或内联汇编会在此阶段以提交策略错误被拒绝。真实 GPU 专化错误、无效 `tl.constexpr`/block 参数、不受支持的 dtype、越界 load/store、资源超限或 PTXAS 错误仍要到第一次真实 GPU 调用时才暴露。先用公开样例触发最小专化，查看 `source.py` 的安全化诊断，再核对当前题目的 Triton 接口说明、mask、grid 和输出写入。
+
+Triton JIT 缓存位于容器内 512 MiB 的 `exec,nosuid,nodev` `/tmp`，任务结束即丢弃。若出现 cache 目录不可写、`Permission denied` 或 `No space left on device`，检查是否修改了 Runner 的 tmpfs/环境变量、容器 memory 或固定镜像，记录 Job ID 并运行 `make logs`。不要挂载持久 host cache，不要关闭只读根文件系统或 `no-new-privileges` 来绕过问题。第一次 JIT 的耗时不计入正式 CUDA Event 样本，但仍受 Job wall-clock timeout 约束。
+
+### 11.9 运行错误、错误答案、超时或输出超限
 
 - `wrong_answer`：检查索引边界、grid/block 覆盖、同步、归约竞争和题目浮点容差。
-- `runtime_error`：检查 `cudaGetLastError` 对应的非法访问、无效配置和资源超限。
+- `runtime_error`：CUDA C++ 检查 `cudaGetLastError` 对应的非法访问、无效配置和资源超限；Triton 检查 Python 异常、launch grid、mask、Tensor device/dtype 和输出写入。
 - `timed_out`：检查死循环、过量 inner work 或无法结束的 kernel；Runner 会强制删除已知容器。若后续任务出现驱动/NVML/Xid 等健康错误，Runner 会进入熔断。
 - `output_limit`：Runner 合并捕获 stdout/stderr；删除 device/host 大量打印，达到总量上限后任务会终止，不能依赖末尾日志。
 
-内部测试失败不会显示隐藏输入。不能通过读取 harness 路径绕过验证。
+内部测试失败不会显示隐藏输入。Triton 策略拒绝文件读取、反射、host/device 打印和结果 sentinel 伪造；不能通过读取 harness 路径或篡改 `__main__` 绕过验证。
 
-MVP 只面向本机或认证局域网中的可信操作者。提交代码与平台 harness 当前位于同一最终进程；平台拒绝多个结果 sentinel、过滤完整验证 stdout，并重新计算 benchmark 统计，但不提供抵抗蓄意 `_Exit` + 完整协议伪造的抗作弊边界。不要把结果用于不可信用户排名或公网竞赛。
+当前版本只面向本机或认证局域网中的可信操作者。提交 Kernel 与平台 harness 仍位于同一最终进程（CUDA 链接、Triton 受限定义加载）；`restricted_triton_v1` 阻断已知的 Python harness 篡改和结果伪造路径，但不是通用 Python/GPU 沙箱的形式化安全证明，CUDA 同进程结果通道也不是抗作弊边界。不要把结果用于不可信用户排名或公网竞赛。
 
-### 11.8 Job 一直排队
+### 11.10 Job 一直排队
 
 单 GPU 串行执行时，前方有运行/验证/benchmark 属正常现象。检查环境状态页、`/api/ready` 和：
 
@@ -448,38 +475,38 @@ make logs
 
 若 Worker 不健康，查看 Worker 日志。仅在没有有效任务执行时使用 `make clean-jobs` 清理不再被活动 Job 引用的临时目录；它不清理容器或修改 Job 数据库状态。Worker 重启会按 Runner + installation labels 回收遗留容器，并把旧 Worker 中断的活动 Job 标为 `system_error`，不会自动重跑；仍在 `queued` 的任务继续排队。
 
-### 11.9 Runner 显示 unhealthy
+### 11.11 Runner 显示 unhealthy
 
 Runner 在提交输出中发现 GPU 丢失、驱动不兼容、NVML 初始化失败、Xid 等候选健康故障后，会用独立受信探针复核；只有探针也失败才持久熔断并阻止后续 GPU Job。这是保护行为，用户 stdout 本身不会触发熔断。
 
-1. 运行 `nvidia-smi` 和 `make doctor`，确认固定容器中的真实 GPU 编译/运行探针通过。
+1. 运行 `nvidia-smi` 和 `make doctor`，确认固定容器中的真实 CUDA 编译/运行与 Triton JIT/运行探针通过。
 2. 必要时重启 Docker Desktop；仍失败时从 PowerShell 执行 `wsl --shutdown` 后重试。
 3. 如果驱动仍异常，可能需要重启 Windows。
-4. 系统恢复且 doctor 通过后，执行 `make recover-runner`。该命令会绕过旧熔断标记重新探测；只有探测健康才删除 `data/runner-unhealthy.json`，并把新环境快照写入 SQLite。
+4. 系统恢复且 doctor 通过后，执行 `make recover-runner`。该命令会绕过旧熔断标记重新探测基础 CUDA/GPU 健康；只有探测健康才删除 `data/runner-unhealthy.json`，并把新 CUDA 环境快照写入 SQLite。Triton 工具链仍以 doctor 和下一次 Triton Job 的独立探测为准。
 5. 若 Worker 因熔断反复重启，完成上述恢复后执行 `make start` 或重启 Worker 服务。
 
 不要手工删除熔断文件或改数据库标志；`make doctor` 只诊断，不会自行解除熔断。
 
-### 11.10 端口 3000 被占用或绑定错误
+### 11.12 端口 3000 被占用或绑定错误
 
 用 `ss -ltnp | grep ':3000'` 或 PowerShell 的 `Get-NetTCPConnection` 找到占用者，停止冲突服务后重新启动。不要为避开冲突把服务绑定到 `0.0.0.0`。默认模式若看到外部接口监听，立即停止 MyLeetGpu；LAN 模式只允许预期的具体 LAN IPv4，并应核对 `make lan-status` 的认证与防火墙规则。
 
-### 11.11 migrate 非零退出
+### 11.13 migrate 非零退出
 
 `migrate` 是一次性服务，`Exited (0)` 正常；非零退出会阻止 API 和 Worker 启动。先执行 `make logs` 查看 Alembic 错误，停止服务并备份整个 `data/`，再修复权限、磁盘空间或 migration 问题。宿主开发环境安装依赖后可运行 `make migrate`；不要删除数据库让启动“看起来成功”，也不要跳过失败 revision。
 
-### 11.12 SQLite busy、磁盘满或数据库损坏
+### 11.14 SQLite busy、磁盘满或数据库损坏
 
 - 检查数据目录所在磁盘空间和权限；不要把数据库放在不可靠的网络文件系统。
 - 短暂 `database is locked` 应由配置的 busy timeout 处理；持续发生时停止服务并检查是否有第二套 API/Worker 共用同一数据目录。
 - 报损坏时立即 `make stop`，备份整个数据目录（包括 `-wal`/`-shm`），再使用 SQLite `PRAGMA integrity_check` 或从已验证备份恢复。
 - 不要在运行时删除主数据库，不要让启动脚本用空库静默覆盖损坏文件。
 
-### 11.13 重启后版本不见了
+### 11.15 重启后版本不见了
 
 确认启动时使用了原来的 `.env` 数据目录和 Compose 持久挂载，且此前没有运行 `down -v` 或完整重置。停止服务，检查旧数据目录/备份，不要继续创建大量新数据覆盖恢复线索。
 
-### 11.14 Benchmark 波动大或指标 unavailable
+### 11.16 Benchmark 波动大或指标 unavailable
 
 关闭其他 GPU 工作负载，统一电源模式，等待温度稳定后使用“当前统一环境重新测试”。检查 CV/MAD 和 p95。WSL 无法提供部分遥测时显示 unavailable 是诚实结果；不能填零或沿用旧值。
 

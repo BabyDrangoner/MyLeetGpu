@@ -8,7 +8,9 @@ import type {
   Job,
   JobAction,
   JobResult,
+  KernelLanguage,
   ProblemDetail,
+  ProblemImplementation,
   ProblemSummary,
   SavedVersion,
 } from '../domain/types'
@@ -93,14 +95,48 @@ function asDate(value: unknown): string {
   return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(text) ? `${text}Z` : text
 }
 
+const KERNEL_LANGUAGES = ['cuda_cpp', 'triton_python'] as const
+
+function isKernelLanguage(value: unknown): value is KernelLanguage {
+  return KERNEL_LANGUAGES.includes(value as KernelLanguage)
+}
+
+function asKernelLanguage(value: unknown, fallback: KernelLanguage = 'cuda_cpp'): KernelLanguage {
+  return isKernelLanguage(value) ? value : fallback
+}
+
+function normalizeSignature(value: unknown): string | undefined {
+  if (typeof value === 'string') return value || undefined
+  const raw = asRecord(value)
+  return asString(raw.declaration ?? raw.symbol) || undefined
+}
+
+function normalizeImplementation(value: unknown, language: KernelLanguage): ProblemImplementation {
+  const raw = asRecord(value)
+  const triton = language === 'triton_python'
+  return {
+    language,
+    display_name: asString(raw.display_name, triton ? 'Triton (Python)' : 'CUDA C++'),
+    file_extension: asString(raw.file_extension ?? raw.source_suffix, triton ? '.py' : '.cu') === '.py' ? '.py' : '.cu',
+    editor_language: asString(raw.editor_language, triton ? 'python' : 'cpp') === 'python' ? 'python' : 'cpp',
+    starter_code: asString(raw.starter_code),
+    signature: normalizeSignature(raw.signature),
+    instructions_markdown: asString(raw.instructions_markdown ?? raw.statement_appendix ?? raw.instructions) || undefined,
+  }
+}
+
 function normalizeProblemSummary(value: unknown): ProblemSummary {
   const raw = asRecord(value)
+  const languages = Array.isArray(raw.languages)
+    ? raw.languages.filter(isKernelLanguage).filter((item, index, all) => all.indexOf(item) === index)
+    : undefined
   return {
     slug: asString(raw.slug ?? raw.id),
     title: asString(raw.title, '未命名题目'),
     difficulty: asString(raw.difficulty, 'easy'),
     revision: asString(raw.revision, '1'),
     summary: asString(raw.summary),
+    languages,
   }
 }
 
@@ -118,8 +154,27 @@ function displayConstraint(name: string, value: unknown): string {
 
 function normalizeProblemDetail(value: unknown): ProblemDetail {
   const raw = asRecord(value)
-  const signature = raw.signature
-  const signatureRecord = asRecord(signature)
+  const implementationRaw = asRecord(raw.implementations)
+  const implementations: Partial<Record<KernelLanguage, ProblemImplementation>> = {}
+  for (const language of KERNEL_LANGUAGES) {
+    if (implementationRaw[language] !== undefined) {
+      implementations[language] = normalizeImplementation(implementationRaw[language], language)
+    }
+  }
+  const legacyLanguage = asKernelLanguage(raw.language)
+  if (!Object.keys(implementations).length) {
+    implementations[legacyLanguage] = normalizeImplementation({
+      language: legacyLanguage,
+      starter_code: raw.starter_code,
+      signature: raw.signature,
+      instructions_markdown: raw.instructions_markdown ?? raw.statement_appendix,
+    }, legacyLanguage)
+  }
+  const requestedDefault = asKernelLanguage(raw.default_language ?? raw.language)
+  const defaultLanguage = implementations[requestedDefault]
+    ? requestedDefault
+    : KERNEL_LANGUAGES.find((language) => implementations[language]) ?? 'cuda_cpp'
+  const defaultImplementation = implementations[defaultLanguage] ?? normalizeImplementation({}, defaultLanguage)
   const constraints = Array.isArray(raw.constraints)
     ? raw.constraints.map((item) => asString(item))
     : Object.entries(asRecord(raw.constraints)).map(([name, item]) => displayConstraint(name, item))
@@ -135,11 +190,13 @@ function normalizeProblemDetail(value: unknown): ProblemDetail {
   })
   return {
     ...normalizeProblemSummary(raw),
+    languages: KERNEL_LANGUAGES.filter((language) => implementations[language]),
     statement_markdown: asString(raw.statement_markdown),
-    starter_code: asString(raw.starter_code),
-    signature: typeof signature === 'string'
-      ? signature
-      : asString(signatureRecord.declaration ?? signatureRecord.symbol),
+    default_language: defaultLanguage,
+    implementations,
+    language: defaultLanguage,
+    starter_code: defaultImplementation.starter_code,
+    signature: defaultImplementation.signature,
     constraints,
     benchmark: { ...benchmarkRaw, input_sizes: inputSizes },
   }
@@ -148,6 +205,7 @@ function normalizeProblemDetail(value: unknown): ProblemDetail {
 function normalizeEnvironment(value: unknown): EnvironmentSnapshot {
   const raw = asRecord(value)
   const telemetry = asRecord(raw.telemetry)
+  const toolchain = asRecord(raw.toolchain)
   const unavailable = Array.isArray(raw.unavailable_metrics)
     ? raw.unavailable_metrics.map((item) => asString(item))
     : Object.entries(telemetry).filter(([, item]) => item === null || item === undefined || item === '').map(([key]) => key)
@@ -155,12 +213,16 @@ function normalizeEnvironment(value: unknown): EnvironmentSnapshot {
   return {
     ...raw,
     healthy,
+    backend: asKernelLanguage(raw.backend),
     status: asString(raw.status, healthy ? 'healthy' : 'unhealthy'),
     gpu_name: asString(raw.gpu_name ?? raw.gpu) || undefined,
     compute_capability: asString(raw.compute_capability) || undefined,
     driver_version: asString(raw.driver_version) || undefined,
     cuda_runtime_version: asString(raw.cuda_runtime_version ?? raw.cuda_version) || undefined,
     nvcc_version: asString(raw.nvcc_version) || undefined,
+    python_version: asString(raw.python_version ?? toolchain.python_version) || undefined,
+    torch_version: asString(raw.torch_version ?? toolchain.torch_version) || undefined,
+    triton_version: asString(raw.triton_version ?? toolchain.triton_version) || undefined,
     container_image: asString(raw.container_image ?? raw.cuda_image) || undefined,
     container_digest: asString(raw.container_digest ?? raw.image_digest) || undefined,
     fingerprint: asString(raw.fingerprint) || undefined,
@@ -168,6 +230,7 @@ function normalizeEnvironment(value: unknown): EnvironmentSnapshot {
     unavailable_metrics: unavailable,
     message: asString(raw.message ?? raw.error) || undefined,
     telemetry: telemetry as Record<string, string | null>,
+    toolchain: toolchain as Record<string, string | null>,
   }
 }
 
@@ -225,6 +288,7 @@ function normalizeVersion(value: unknown): SavedVersion {
     id: asString(raw.id),
     problem_id: asString(raw.problem_id),
     problem_revision: asString(raw.problem_revision),
+    language: asKernelLanguage(raw.language),
     name: asString(raw.name, '未命名版本'),
     notes: asString(raw.notes) || undefined,
     source_hash: asString(raw.source_hash),
@@ -253,6 +317,8 @@ function normalizeJob(value: unknown): Job {
   } : null
   return {
     id: asString(raw.id),
+    problem_id: asString(raw.problem_id) || undefined,
+    language: asKernelLanguage(raw.language),
     status: asString(raw.status, 'queued') as Job['status'],
     action: asString(raw.action, 'compile') as Job['action'],
     phase: asString(raw.phase) || undefined,
@@ -289,6 +355,7 @@ function normalizeComparison(value: unknown, versionIds: string[], baselineId: s
     environment_consistent: Boolean(raw.environment_consistent),
     rows,
     baseline_id: asString(raw.baseline_id, baselineId),
+    language: raw.language === undefined ? undefined : asKernelLanguage(raw.language),
     version_ids: Array.isArray(raw.version_ids) ? raw.version_ids.map((id) => asString(id)) : versionIds,
     environment: raw.environment ? normalizeEnvironment(raw.environment) : undefined,
   }
@@ -296,6 +363,7 @@ function normalizeComparison(value: unknown, versionIds: string[], baselineId: s
 
 export interface CreateJobInput {
   problem_id: string
+  language: KernelLanguage
   action: JobAction
   source?: string
   version_name?: string
@@ -316,16 +384,17 @@ export const api = {
   },
 
   drafts: {
-    async get(problemId: string): Promise<Draft> {
-      const raw = asRecord(await request(`/drafts/${encodeURIComponent(problemId)}`))
-      return { problem_id: asString(raw.problem_id, problemId), source: asString(raw.source ?? raw.source_code), updated_at: asDate(raw.updated_at) }
+    async get(problemId: string, language: KernelLanguage): Promise<Draft> {
+      const query = new URLSearchParams({ language })
+      const raw = asRecord(await request(`/drafts/${encodeURIComponent(problemId)}?${query}`))
+      return { problem_id: asString(raw.problem_id, problemId), language: asKernelLanguage(raw.language, language), source: asString(raw.source ?? raw.source_code), updated_at: asDate(raw.updated_at) }
     },
-    async save(problemId: string, source: string): Promise<Draft> {
+    async save(problemId: string, language: KernelLanguage, source: string): Promise<Draft> {
       const raw = asRecord(await request(`/drafts/${encodeURIComponent(problemId)}`, {
         method: 'PUT',
-        body: JSON.stringify({ problem_id: problemId, source }),
+        body: JSON.stringify({ language, source }),
       }))
-      return { problem_id: asString(raw.problem_id, problemId), source: asString(raw.source ?? raw.source_code), updated_at: asDate(raw.updated_at) }
+      return { problem_id: asString(raw.problem_id, problemId), language: asKernelLanguage(raw.language, language), source: asString(raw.source ?? raw.source_code), updated_at: asDate(raw.updated_at) }
     },
   },
 
@@ -354,19 +423,20 @@ export const api = {
     remove(id: string): Promise<void> {
       return request(`/versions/${encodeURIComponent(id)}?confirmed=true`, { method: 'DELETE' })
     },
-    async compare(problemId: string, versionIds: string[], baselineId: string): Promise<ComparisonResult> {
+    async compare(problemId: string, language: KernelLanguage, versionIds: string[], baselineId: string): Promise<ComparisonResult> {
       const result = await request('/versions/compare', {
         method: 'POST',
         body: JSON.stringify({
           problem_id: problemId,
+          language,
           version_ids: versionIds,
           baseline_id: baselineId,
         }),
       })
       return normalizeComparison(result, versionIds, baselineId)
     },
-    async findDuplicates(problemId: string, sourceHash: string): Promise<SavedVersion[]> {
-      const query = new URLSearchParams({ problem_id: problemId, source_hash: sourceHash })
+    async findDuplicates(problemId: string, language: KernelLanguage, sourceHash: string): Promise<SavedVersion[]> {
+      const query = new URLSearchParams({ problem_id: problemId, language, source_hash: sourceHash })
       try {
         const payload = await request<{ items?: unknown[] } | unknown[]>(`/versions/duplicates?${query}`)
         return listItems(payload).map(normalizeVersion)
@@ -377,7 +447,8 @@ export const api = {
     },
   },
 
-  async environment(): Promise<EnvironmentSnapshot> {
-    return normalizeEnvironment(await request('/environment'))
+  async environment(language: KernelLanguage = 'cuda_cpp'): Promise<EnvironmentSnapshot> {
+    const query = new URLSearchParams({ language })
+    return normalizeEnvironment(await request(`/environment?${query}`))
   },
 }

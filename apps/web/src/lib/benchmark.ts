@@ -28,6 +28,7 @@ export function localComparability(versions: SavedVersion[]): { comparable: bool
   const values = <T,>(selector: (version: SavedVersion) => T | undefined) =>
     new Set(versions.map(selector).filter((value) => value !== undefined))
   const reasons: string[] = []
+  if (values((version) => version.language).size > 1) reasons.push('实现语言不一致')
   if (values((version) => version.problem_revision).size > 1) reasons.push('题目修订版本不一致')
   if (values((version) => latestBenchmarkRun(version)?.suite_hash).size > 1) reasons.push('测试套件不一致')
   if (values((version) => {

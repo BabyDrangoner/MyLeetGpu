@@ -24,15 +24,15 @@ describe('useJob', () => {
   afterEach(() => vi.useRealTimers())
 
   it('polls an asynchronous job through phases to a terminal result', async () => {
-    createMock.mockResolvedValue({ id: 'job-1', action: 'validate', status: 'queued' })
+    createMock.mockResolvedValue({ id: 'job-1', language: 'triton_python', action: 'validate', status: 'queued' })
     getMock
-      .mockResolvedValueOnce({ id: 'job-1', action: 'validate', status: 'validating', progress: 45 })
-      .mockResolvedValueOnce({ id: 'job-1', action: 'validate', status: 'succeeded', progress: 100, result: { message: '全部通过' } })
+      .mockResolvedValueOnce({ id: 'job-1', language: 'triton_python', action: 'validate', status: 'validating', progress: 45 })
+      .mockResolvedValueOnce({ id: 'job-1', language: 'triton_python', action: 'validate', status: 'succeeded', progress: 100, result: { message: '全部通过' } })
     const settled = vi.fn()
     const { result } = renderHook(() => useJob(settled))
 
     await act(async () => {
-      await result.current.start({ problem_id: 'vector-addition', action: 'validate', source: '// source' })
+      await result.current.start({ problem_id: 'vector-addition', language: 'triton_python', action: 'validate', source: '# source' })
     })
     expect(result.current.job?.status).toBe('queued')
 

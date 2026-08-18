@@ -122,6 +122,7 @@ def test_identical_comparability_keys_have_no_differences() -> None:
 @pytest.mark.parametrize(
     ("override", "message"),
     [
+        ({"language": "triton_python"}, "实现语言不同"),
         ({"problem_revision": "8"}, "题目版本不同"),
         ({"suite_hash": "suite-b"}, "benchmark suite 不同"),
         ({"input_sizes": ["1M", "64K"]}, "输入规模不同"),

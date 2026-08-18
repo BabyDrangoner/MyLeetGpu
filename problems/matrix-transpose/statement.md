@@ -6,22 +6,11 @@
 output[col * rows + row] = input[row * cols + col]
 ```
 
-## 接口
+## 实现约束
 
-你只需要实现以下函数，不能提供 `main`：
+只实现平台约定的 `solve`，不要提供独立程序入口。`input` 和 `output` 是 GPU 上互不重叠、按行主序连续存放的 `float32` 一维缓冲区。`rows`、`cols` 均至少为 1、至多为 8192，且元素总数不超过 16,777,216。输入都是 `[-50, 50]` 内的有限值。
 
-```cpp
-void solve(
-    const float* input,
-    float* output,
-    int rows,
-    int cols,
-    cudaStream_t stream);
-```
-
-`input` 和 `output` 是互不重叠的设备内存。`rows`、`cols` 均至少为 1、至多为 8192，且元素总数不超过 16,777,216。输入都是 `[-50, 50]` 内的有限值。
-
-所有异步操作必须使用传入的 `stream`。函数返回前无需同步，也不要释放或替换平台传入的缓冲区。
+平台预先分配输入和输出，并控制执行 stream。实现必须把工作提交到平台选择的当前 stream，写入已有的 `output`，且不应在返回前执行设备级同步。所选语言的确切函数签名和调用规则见题面末尾的语言说明。
 
 ## 正确性
 
@@ -30,4 +19,3 @@ void solve(
 ## 性能说明
 
 平台会在计时前创建 CUDA 上下文、生成并上传输入、分配内存和执行预热。每个样本使用同一条 stream 上的一对 CUDA Events，仅包围若干次 `solve`；报告值会除以重复次数。可考虑合并访存以及 shared-memory bank conflict 对转置吞吐的影响。
-

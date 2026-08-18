@@ -27,6 +27,19 @@ test('refuses unified speedup when environment fingerprints differ', async ({ pa
   await expect(page.getByText('环境不一致')).toBeVisible()
 })
 
+test('groups saved versions by language and never selects cross-language baselines', async ({ page }) => {
+  await installMockApi(page, { versions: true, comparable: true, tritonVersion: true })
+  await page.goto('/problems/vector-addition/versions?language=triton_python')
+
+  await expect(page.getByRole('button', { name: /Triton \(Python\) 1/ })).toHaveClass(/active/)
+  await expect(page.locator('.version-row')).toHaveCount(1)
+  await expect(page.getByText('Triton baseline')).toBeVisible()
+  await expect(page.getByText('再选择一个版本')).toBeVisible()
+  await page.getByRole('button', { name: /CUDA C\+\+ 2/ }).click()
+  await expect(page.locator('.version-row')).toHaveCount(2)
+  await expect(page.getByText('可直接比较')).toBeVisible()
+})
+
 test('edits metadata and requires the destructive second confirmation', async ({ page }) => {
   const state = await installMockApi(page, { versions: true, comparable: true })
   await page.goto('/problems/vector-addition/versions')

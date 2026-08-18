@@ -47,6 +47,7 @@ class Measurement(BaseModel):
 
 
 class ComparabilityKey(BaseModel):
+    language: str = "cuda_cpp"
     problem_revision: str
     suite_hash: str
     input_sizes: list[str]
@@ -55,6 +56,7 @@ class ComparabilityKey(BaseModel):
 
     def differences(self, other: ComparabilityKey) -> list[str]:
         labels = {
+            "language": "实现语言不同",
             "problem_revision": "题目版本不同",
             "suite_hash": "benchmark suite 不同",
             "input_sizes": "输入规模不同",

@@ -26,22 +26,37 @@ class Repository:
     def __init__(self, session_factory: sessionmaker[Session]):
         self.session_factory = session_factory
 
-    def get_draft(self, problem_id: str) -> DraftRecord | None:
+    def get_draft(self, problem_id: str, language: str = "cuda_cpp") -> DraftRecord | None:
         with self.session_factory() as session:
-            return session.scalar(select(DraftRecord).where(DraftRecord.problem_id == problem_id))
+            return session.scalar(
+                select(DraftRecord).where(
+                    DraftRecord.problem_id == problem_id,
+                    DraftRecord.language == language,
+                )
+            )
 
-    def upsert_draft(self, problem_id: str, source_code: str) -> DraftRecord:
+    def upsert_draft(
+        self, problem_id: str, source_code: str, language: str = "cuda_cpp"
+    ) -> DraftRecord:
         now = utc_now()
         with self.session_factory.begin() as session:
             statement = insert(DraftRecord).values(
-                problem_id=problem_id, source_code=source_code, updated_at=now
+                problem_id=problem_id,
+                language=language,
+                source_code=source_code,
+                updated_at=now,
             )
             statement = statement.on_conflict_do_update(
-                index_elements=[DraftRecord.problem_id],
+                index_elements=[DraftRecord.problem_id, DraftRecord.language],
                 set_={"source_code": source_code, "updated_at": now},
             )
             session.execute(statement)
-            return session.scalar(select(DraftRecord).where(DraftRecord.problem_id == problem_id))
+            return session.scalar(
+                select(DraftRecord).where(
+                    DraftRecord.problem_id == problem_id,
+                    DraftRecord.language == language,
+                )
+            )
 
     def add_job(self, record: JobRecord) -> JobRecord:
         with self.session_factory.begin() as session:
@@ -228,6 +243,7 @@ class Repository:
                     .order_by(EnvironmentSnapshotRecord.observed_at.desc())
                 )
                 if existing:
+                    existing.backend = getattr(probe, "backend", "cuda_cpp")
                     existing.healthy = probe.healthy
                     existing.gpu_name = probe.gpu_name
                     existing.compute_capability = probe.compute_capability
@@ -237,6 +253,7 @@ class Repository:
                     existing.cuda_image = probe.cuda_image
                     existing.image_digest = probe.image_digest
                     existing.cuda_arch = probe.cuda_arch
+                    existing.toolchain_json = getattr(probe, "toolchain", {})
                     existing.telemetry_json = probe.telemetry
                     existing.error = probe.error
                     existing.observed_at = observed_at
@@ -244,6 +261,7 @@ class Repository:
                     return existing
             record = EnvironmentSnapshotRecord(
                 fingerprint=probe.fingerprint,
+                backend=getattr(probe, "backend", "cuda_cpp"),
                 healthy=probe.healthy,
                 gpu_name=probe.gpu_name,
                 compute_capability=probe.compute_capability,
@@ -253,6 +271,7 @@ class Repository:
                 cuda_image=probe.cuda_image,
                 image_digest=probe.image_digest,
                 cuda_arch=probe.cuda_arch,
+                toolchain_json=getattr(probe, "toolchain", {}),
                 telemetry_json=probe.telemetry,
                 error=probe.error,
                 observed_at=observed_at,
@@ -261,10 +280,13 @@ class Repository:
             session.flush()
             return record
 
-    def latest_environment(self) -> EnvironmentSnapshotRecord | None:
+    def latest_environment(self, backend: str | None = None) -> EnvironmentSnapshotRecord | None:
         with self.session_factory() as session:
+            statement = select(EnvironmentSnapshotRecord)
+            if backend is not None:
+                statement = statement.where(EnvironmentSnapshotRecord.backend == backend)
             return session.scalar(
-                select(EnvironmentSnapshotRecord).order_by(
+                statement.order_by(
                     EnvironmentSnapshotRecord.observed_at.desc(),
                     EnvironmentSnapshotRecord.created_at.desc(),
                 )
@@ -289,11 +311,13 @@ class Repository:
         iterations: int,
         measurements: list[dict[str, Any]],
         raw_samples: list[dict[str, Any]],
+        language: str = "cuda_cpp",
     ) -> VersionRecord:
         with self.session_factory.begin() as session:
             version = VersionRecord(
                 problem_id=problem_id,
                 problem_revision=problem_revision,
+                language=language,
                 name=name,
                 notes=notes,
                 source_code=source_code,
@@ -334,13 +358,14 @@ class Repository:
             session.flush()
         return records
 
-    def list_versions(self, problem_id: str) -> list[VersionRecord]:
+    def list_versions(self, problem_id: str, language: str | None = None) -> list[VersionRecord]:
         with self.session_factory() as session:
-            statement: Select[tuple[VersionRecord]] = (
-                select(VersionRecord)
-                .where(VersionRecord.problem_id == problem_id)
-                .order_by(VersionRecord.created_at.desc(), VersionRecord.id)
+            statement: Select[tuple[VersionRecord]] = select(VersionRecord).where(
+                VersionRecord.problem_id == problem_id
             )
+            if language is not None:
+                statement = statement.where(VersionRecord.language == language)
+            statement = statement.order_by(VersionRecord.created_at.desc(), VersionRecord.id)
             return list(session.scalars(statement).unique())
 
     def get_version(self, version_id: str) -> VersionRecord | None:
@@ -357,13 +382,16 @@ class Repository:
         by_id = {record.id: record for record in records}
         return [by_id[item] for item in version_ids if item in by_id]
 
-    def find_duplicate_versions(self, problem_id: str, source_hash: str) -> list[VersionRecord]:
+    def find_duplicate_versions(
+        self, problem_id: str, source_hash: str, language: str = "cuda_cpp"
+    ) -> list[VersionRecord]:
         with self.session_factory() as session:
             return list(
                 session.scalars(
                     select(VersionRecord)
                     .where(
                         VersionRecord.problem_id == problem_id,
+                        VersionRecord.language == language,
                         VersionRecord.source_hash == source_hash,
                     )
                     .order_by(VersionRecord.created_at.desc())

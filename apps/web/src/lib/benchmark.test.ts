@@ -7,6 +7,7 @@ function version(id: string, overrides: Partial<SavedVersion> = {}): SavedVersio
     id,
     problem_id: 'vector-add',
     problem_revision: '1',
+    language: 'cuda_cpp',
     name: id,
     source_hash: id,
     source_code: '// code',
@@ -46,6 +47,14 @@ describe('benchmark comparability', () => {
       '运行环境指纹不一致',
       '输入规模不一致',
     ]))
+  })
+
+  it('never treats different implementation languages as directly comparable', () => {
+    const triton = version('triton', { language: 'triton_python' })
+    expect(localComparability([version('cuda'), triton])).toEqual({
+      comparable: false,
+      reasons: ['实现语言不一致'],
+    })
   })
 
   it('reads both supported comparison row shapes', () => {

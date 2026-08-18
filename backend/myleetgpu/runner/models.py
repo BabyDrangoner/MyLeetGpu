@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+type RunnerLanguage = Literal["cuda_cpp", "triton_python"]
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,8 @@ class EnvironmentProbe:
     telemetry: dict[str, str | None] = field(default_factory=dict)
     error: str | None = None
     fingerprint: str = ""
+    backend: str = "cuda_cpp"
+    toolchain: dict[str, Any] = field(default_factory=dict)
 
 
 class RunnerFailure(RuntimeError):

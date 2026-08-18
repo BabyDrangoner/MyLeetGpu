@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -22,6 +23,10 @@ class Settings(BaseSettings):
     problems_dir: Path = Path("problems")
     host_data_dir: Path | None = None
     cuda_image: str = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+    triton_image: str = (
+        "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel"
+        "@sha256:14611869895df612b7b07227d5925f30ec3cd6673bad58ce3d84ed107950e014"
+    )
     cuda_arch: str = "auto"
     log_level: str = "INFO"
     job_poll_seconds: float = Field(default=0.25, ge=0.05, le=10)
@@ -37,12 +42,12 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8000, ge=1, le=65535)
 
-    @field_validator("cuda_image")
+    @field_validator("cuda_image", "triton_image")
     @classmethod
     def reject_latest_image(cls, value: str) -> str:
         value = value.strip()
         if not value or value.endswith(":latest") or ":" not in value:
-            raise ValueError("CUDA image must use an explicit tag or digest, never latest")
+            raise ValueError("runner image must use an explicit tag or digest, never latest")
         return value
 
     @field_validator("cuda_arch")
@@ -74,6 +79,21 @@ class Settings(BaseSettings):
     def resolved_host_data_dir(self) -> Path:
         raw = self.host_data_dir or self.data_dir
         return raw.expanduser().resolve()
+
+    @property
+    def host_data_mount(self) -> str:
+        """Return a Docker-daemon path without corrupting Windows drive paths.
+
+        The Worker itself runs in Linux, but a stack launched from PowerShell
+        legitimately receives a value such as ``D:/MyLeetGpu/data``. Resolving
+        that value with POSIX pathlib would incorrectly prefix the container's
+        current directory.
+        """
+
+        raw = str(self.host_data_dir or self.data_dir).replace("\\", "/").rstrip("/")
+        if re.match(r"^[A-Za-z]:/", raw):
+            return raw
+        return self.resolved_host_data_dir.as_posix()
 
     def ensure_directories(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)

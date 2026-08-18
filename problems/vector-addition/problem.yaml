@@ -1,14 +1,46 @@
-schema_version: 1
+schema_version: 2
 slug: vector-addition
 title: 向量逐元素相加
 difficulty: easy
 revision: 1
-language: cuda_cpp
+default_language: cuda_cpp
 
-signature:
-  header: include/solve.h
-  symbol: solve
-  declaration: "void solve(const float* a, const float* b, float* output, int n, cudaStream_t stream)"
+implementations:
+  cuda_cpp:
+    language: cuda_cpp
+    starter: starter.cu
+    statement_appendix: instructions/cuda_cpp.md
+    signature:
+      header: include/solve.h
+      symbol: solve
+      declaration: "void solve(const float* a, const float* b, float* output, int n, cudaStream_t stream)"
+    harness:
+      validator: harness/validator.cu
+      benchmark: harness/benchmark.cu
+    compiler:
+      executable: nvcc
+      standard: c++17
+      optimization: O3
+      architecture: detected
+      allowed_flags:
+        - --std=c++17
+        - -O3
+      include_paths:
+        - include
+  triton_python:
+    language: triton_python
+    starter: triton/starter.py
+    statement_appendix: instructions/triton_python.md
+    signature:
+      symbol: solve
+      declaration: "def solve(a: torch.Tensor, b: torch.Tensor, output: torch.Tensor, n: int) -> None"
+    harness:
+      validator: triton/harness/validator.py
+      benchmark: triton/harness/benchmark.py
+    runtime:
+      profile: triton_torch_cuda_v1
+      executable: python3
+      syntax_check: py_compile
 
 types:
   inputs:
@@ -24,9 +56,6 @@ types:
       access: read_only
     - name: n
       type: int32
-      memory: host_value
-    - name: stream
-      type: cuda_stream
       memory: host_value
   outputs:
     - name: output
@@ -51,11 +80,6 @@ tolerance:
   rtol: 0.000001
   nan_equal: false
   infinity: same_sign
-
-starter: starter.cu
-harness:
-  validator: harness/validator.cu
-  benchmark: harness/benchmark.cu
 
 public:
   seed: 1701
@@ -103,15 +127,3 @@ timeouts:
   public_ms: 5000
   validation_ms: 10000
   benchmark_ms: 60000
-
-compiler:
-  executable: nvcc
-  standard: c++17
-  optimization: O3
-  architecture: detected
-  allowed_flags:
-    - --std=c++17
-    - -O3
-  include_paths:
-    - include
-

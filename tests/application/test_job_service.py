@@ -93,6 +93,53 @@ def test_submission_writes_normalized_private_snapshot_but_not_source_to_job_rec
     assert all(source.encode() not in path.read_bytes() for path in database_files)
 
 
+def test_triton_submission_uses_an_isolated_python_snapshot(service_bundle) -> None:
+    _, repository, service = service_bundle
+    source = "def solve(a, b, output, n):\r\n    return None\r\n"
+
+    job = service.submit(
+        problem_id="vector-addition",
+        language="triton_python",
+        action=JobAction.VALIDATE,
+        source=source,
+    )
+
+    spool = Path(job.spool_path)  # type: ignore[arg-type]
+    assert job.language == "triton_python"
+    assert (spool / "source.py").read_text(encoding="utf-8") == (
+        "def solve(a, b, output, n):\n    return None\n"
+    )
+    assert not (spool / "source.cu").exists()
+    assert repository.get_job(job.id).language == "triton_python"  # type: ignore[union-attr]
+
+
+def test_language_is_part_of_duplicate_and_rebenchmark_identity(service_bundle) -> None:
+    _, repository, service = service_bundle
+    existing = create_saved_version(
+        repository,
+        source=SOURCE,
+        source_digest=source_hash(SOURCE),
+        language="cuda_cpp",
+    )
+
+    triton = service.submit(
+        problem_id="vector-addition",
+        language="triton_python",
+        action=JobAction.SAVE_VERSION,
+        source=SOURCE,
+        version_name="same bytes, different language",
+    )
+    assert triton.status == "queued"
+
+    with pytest.raises(JobSubmissionError, match="requested language"):
+        service.submit(
+            problem_id="vector-addition",
+            language="triton_python",
+            action=JobAction.REBENCHMARK,
+            version_ids=[existing.id],
+        )
+
+
 def test_save_version_submission_only_queues_work_and_freezes_click_time_source(
     service_bundle,
 ) -> None:

@@ -65,6 +65,7 @@ def test_comparable_versions_report_per_size_speedup_against_baseline(
 @pytest.mark.parametrize(
     ("overrides", "expected_reason"),
     [
+        ({"language": "triton_python"}, "实现语言不同"),
         ({"revision": "2"}, "题目版本不同"),
         ({"suite_digest": "t" * 64}, "benchmark suite 不同"),
         ({"sizes": ("16M",), "medians": (1.0,)}, "输入规模不同"),
@@ -120,6 +121,25 @@ def test_environment_consistency_is_reported_separately(repository: Repository) 
     candidate_details = next(item for item in result["versions"] if item["id"] == candidate.id)
     assert candidate_details["environment"]["fingerprint"] == "different-environment"
     assert candidate_details["environment"]["gpu_name"] == "NVIDIA GeForce RTX 4060"
+
+
+def test_explicit_compare_language_rejects_mismatched_versions(repository: Repository) -> None:
+    cuda = create_saved_version(repository, source_digest="1" * 64)
+    triton = create_saved_version(
+        repository,
+        source_digest="2" * 64,
+        language="triton_python",
+        compile_flags=("backend=triton_python",),
+    )
+
+    with pytest.raises(ComparisonError, match="requested implementation language"):
+        compare_versions(
+            repository,
+            problem_id="vector-addition",
+            version_ids=[cuda.id, triton.id],
+            baseline_id=cuda.id,
+            language="cuda_cpp",
+        )
 
 
 @pytest.mark.parametrize(

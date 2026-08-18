@@ -79,6 +79,9 @@ def test_problem_list_and_detail_expose_three_public_manifests_only(api) -> None
     serialized = detail.text
     assert payload["slug"] == "reduction"
     assert "starter_code" in payload
+    assert payload["default_language"] == "cuda_cpp"
+    assert set(payload["implementations"]) == {"cuda_cpp", "triton_python"}
+    assert payload["implementations"]["triton_python"]["editor_language"] == "python"
     assert "internal" not in payload
     assert "public" not in payload
     assert "harness" not in payload
@@ -115,6 +118,53 @@ def test_draft_round_trip_is_problem_scoped_and_does_not_create_version(api) -> 
     assert fetched.json()["source"] == "second draft"
     assert app.state.repository.counts()["drafts"] == 1
     assert app.state.repository.counts()["versions"] == 0
+
+
+def test_cuda_and_triton_drafts_are_independent_api_resources(api) -> None:
+    client, app = api
+
+    cuda = client.put(
+        "/api/drafts/vector-addition",
+        json={"language": "cuda_cpp", "source": "cuda draft"},
+    )
+    triton = client.put(
+        "/api/drafts/vector-addition",
+        json={"language": "triton_python", "source": "triton draft"},
+    )
+
+    assert cuda.json()["language"] == "cuda_cpp"
+    assert triton.json()["language"] == "triton_python"
+    assert (
+        client.get("/api/drafts/vector-addition", params={"language": "cuda_cpp"}).json()["source"]
+        == "cuda draft"
+    )
+    assert (
+        client.get("/api/drafts/vector-addition", params={"language": "triton_python"}).json()[
+            "source"
+        ]
+        == "triton draft"
+    )
+    assert app.state.repository.counts()["drafts"] == 2
+
+
+def test_triton_job_language_is_persisted_and_returned(api) -> None:
+    client, app = api
+
+    response = client.post(
+        "/api/jobs",
+        json={
+            "problem_id": "vector-addition",
+            "language": "triton_python",
+            "action": "run",
+            "source": "def solve(a, b, output, n):\n    return None\n",
+        },
+    )
+
+    assert response.status_code == 202
+    assert response.json()["language"] == "triton_python"
+    job = app.state.repository.get_job(response.json()["id"])
+    assert job is not None and job.language == "triton_python"
+    assert Path(job.spool_path, "source.py").is_file()
 
 
 def test_repeated_ordinary_job_posts_never_create_versions_or_echo_source(api) -> None:

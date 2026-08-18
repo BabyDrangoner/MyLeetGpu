@@ -15,6 +15,7 @@ const existing: SavedVersion = {
   id: 'v1',
   problem_id: 'vector-add',
   problem_revision: '1',
+  language: 'cuda_cpp',
   name: '初始实现',
   source_hash: 'same-hash',
   source_code: '// snapshot',
@@ -36,6 +37,7 @@ describe('SaveVersionDialog', () => {
       <SaveVersionDialog
         open
         problemId="vector-add"
+        language="cuda_cpp"
         snapshot="// snapshot"
         currentSource="// edited after click"
         existingVersions={[existing]}
@@ -56,6 +58,7 @@ describe('SaveVersionDialog', () => {
     await waitFor(() => expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
       name: '复测版本',
       source: '// snapshot',
+      language: 'cuda_cpp',
       allowDuplicate: true,
     })))
   })

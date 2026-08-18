@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { installMockApi, starterSource } from './mock-api'
+import { installMockApi, starterSource, tritonStarterSource } from './mock-api'
 
 test('loads three original problems and opens the CUDA workspace', async ({ page }) => {
   await installMockApi(page)
@@ -13,6 +13,7 @@ test('loads three original problems and opens the CUDA workspace', async ({ page
 
   await expect(page.getByRole('heading', { name: '向量逐元素相加', level: 1 }).first()).toBeVisible()
   await expect(page.getByText('solution.cu')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Triton (Python)' })).toBeVisible()
   await expect(page.getByText('等待任务')).toBeVisible()
   await page.getByRole('button', { name: '测量协议' }).click()
   await expect(page.getByText('64K / 1M')).toBeVisible()
@@ -53,9 +54,39 @@ test('saves the click-time snapshot explicitly and keeps it after refresh', asyn
   await expect(page.getByRole('link', { name: /性能版本 1/ })).toBeVisible()
 
   expect(state.submittedJobs).toHaveLength(1)
-  expect(state.submittedJobs[0]).toMatchObject({ action: 'save_version', version_name: '首个稳定版本', source: starterSource })
+  expect(state.submittedJobs[0]).toMatchObject({ action: 'save_version', language: 'cuda_cpp', version_name: '首个稳定版本', source: starterSource })
   await page.reload()
   await expect(page.getByRole('link', { name: /性能版本 1/ })).toBeVisible()
   await page.getByRole('link', { name: /性能版本 1/ }).click()
   await expect(page.getByText('首个稳定版本')).toBeVisible()
+})
+
+test('switches to Triton with a language-scoped starter, URL and job payload', async ({ page }) => {
+  const state = await installMockApi(page)
+  await page.goto('/problems/vector-addition')
+
+  await page.getByRole('button', { name: 'Triton (Python)' }).click()
+  await expect(page).toHaveURL(/language=triton_python/)
+  await expect(page.getByText('solution.py')).toBeVisible()
+  await expect(page.locator('.signature-block code')).toHaveText('def solve(a: torch.Tensor, b: torch.Tensor, output: torch.Tensor, n: int) -> None')
+  await page.getByRole('button', { name: '运行样例' }).click()
+
+  expect(state.submittedJobs.at(-1)).toMatchObject({ action: 'run', language: 'triton_python', source: tritonStarterSource })
+  await page.reload()
+  await expect(page).toHaveURL(/language=triton_python/)
+  await expect(page.getByText('solution.py')).toBeVisible()
+
+  await page.getByRole('button', { name: 'CUDA C++' }).click()
+  await expect(page).toHaveURL(/language=cuda_cpp/)
+  await expect(page.getByText('solution.cu')).toBeVisible()
+})
+
+test('shows the independently probed Triton toolchain environment', async ({ page }) => {
+  await installMockApi(page)
+  await page.goto('/environment')
+
+  await expect(page.getByText('NVCC', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Triton (Python)' }).click()
+  await expect(page.getByText('Python / PyTorch / Triton')).toBeVisible()
+  await expect(page.getByText('3.11.10 / 2.5.1+cu124 / 3.2.0')).toBeVisible()
 })

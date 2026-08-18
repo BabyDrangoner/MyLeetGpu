@@ -54,7 +54,7 @@ export function JobPanel({ job, requestError, onClear }: { job: Job | null; requ
   const summary = typeof job.result?.summary === 'string' ? job.result.summary : job.result?.message
   const errorStage = typeof job.error === 'object' && job.error ? job.error.stage : undefined
   const diagnosticsTitle = job.phase === 'compiling' || errorStage === 'compiling' || job.action === 'compile'
-    ? 'NVCC 诊断'
+    ? (job.language === 'triton_python' ? 'Triton / Python 诊断' : 'NVCC 诊断')
     : '运行输出（已限制）'
 
   return (
@@ -64,6 +64,7 @@ export function JobPanel({ job, requestError, onClear }: { job: Job | null; requ
           {active ? <LoaderCircle className="spin" size={16} /> : job.status === 'succeeded' ? <Check size={16} /> : timedOut ? <Clock3 size={16} /> : <CircleAlert size={16} />}
           <strong>{readableStatus(job.status)}</strong>
         </div>
+        <span className="job-language">{job.language === 'triton_python' ? 'Triton' : 'CUDA C++'}</span>
         <span className="job-id">任务 {job.id.slice(0, 8)}</span>
         {onClear && !active && <button className="text-button" type="button" onClick={onClear}>清空</button>}
       </div>

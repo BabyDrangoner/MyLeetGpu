@@ -29,11 +29,11 @@ export function ProblemListPage() {
         <div>
           <div className="eyebrow"><Sparkles size={14} /> CUDA KERNEL LAB</div>
           <h1>把想法变成更快的 Kernel</h1>
-          <p>在同一套本地环境里编写、验证并严谨比较 CUDA C++ 实现。</p>
+          <p>在同一套本地环境里编写、验证并严谨比较 CUDA C++ 与 Triton Kernel。</p>
         </div>
         <div className="hero-stat-grid">
           <div className="hero-stat"><strong>{problems?.length ?? '—'}</strong><span>原创题目</span></div>
-          <div className="hero-stat"><strong>CUDA</strong><span>唯一语言</span></div>
+          <div className="hero-stat"><strong>2</strong><span>Kernel 语言</span></div>
           <div className="hero-stat"><strong>Median</strong><span>核心指标</span></div>
         </div>
       </section>
@@ -75,7 +75,7 @@ export function ProblemListPage() {
                   {index % 3 === 0 ? <span className="vector-glyph">A + B → C</span> : index % 3 === 1 ? <span className="matrix-glyph"><i /><i /><i /><i /></span> : <Gauge size={33} />}
                 </div>
                 <h3>{problem.title}</h3>
-                <p>{problem.summary || '编写高效、正确且可验证的 CUDA Kernel。'}</p>
+                <p>{problem.summary || '编写高效、正确且可验证的 GPU Kernel。'}</p>
                 <div className="problem-meta">
                   <span><BookOpen size={14} /> 修订 {problem.revision}</span>
                   <span className="start-link">开始编码 <ArrowRight size={15} /></span>

@@ -56,6 +56,16 @@ def test_draft_upsert_keeps_one_mutable_record_per_problem(repository: Repositor
     assert repository.counts()["drafts"] == 1
 
 
+def test_drafts_are_isolated_by_problem_and_kernel_language(repository: Repository) -> None:
+    cuda = repository.upsert_draft("vector-addition", "cuda source", "cuda_cpp")
+    triton = repository.upsert_draft("vector-addition", "triton source", "triton_python")
+
+    assert cuda.id != triton.id
+    assert repository.get_draft("vector-addition", "cuda_cpp").source_code == "cuda source"  # type: ignore[union-attr]
+    assert repository.get_draft("vector-addition", "triton_python").source_code == "triton source"  # type: ignore[union-attr]
+    assert repository.counts()["drafts"] == 2
+
+
 def test_claim_next_job_is_fifo_and_atomic(repository: Repository) -> None:
     repository.add_job(make_job("later", created_offset=10))
     repository.add_job(make_job("first", created_offset=0))
@@ -296,6 +306,49 @@ def test_duplicate_lookup_is_problem_scoped(repository: Repository) -> None:
     duplicates = repository.find_duplicate_versions("vector-addition", "d" * 64)
 
     assert [item.id for item in duplicates] == [first.id]
+
+
+def test_duplicate_lookup_and_version_listing_are_language_scoped(
+    repository: Repository,
+) -> None:
+    cuda = create_saved_version(
+        repository,
+        name="cuda",
+        source="same text",
+        source_digest="e" * 64,
+        language="cuda_cpp",
+    )
+    triton = create_saved_version(
+        repository,
+        name="triton",
+        source="same text",
+        source_digest="e" * 64,
+        language="triton_python",
+        compile_flags=("backend=triton_python",),
+    )
+
+    assert [
+        item.id
+        for item in repository.find_duplicate_versions("vector-addition", "e" * 64, "cuda_cpp")
+    ] == [cuda.id]
+    assert [
+        item.id
+        for item in repository.find_duplicate_versions("vector-addition", "e" * 64, "triton_python")
+    ] == [triton.id]
+    assert [item.id for item in repository.list_versions("vector-addition", "cuda_cpp")] == [
+        cuda.id
+    ]
+    assert [item.id for item in repository.list_versions("vector-addition", "triton_python")] == [
+        triton.id
+    ]
+
+
+def test_latest_environment_can_be_selected_per_backend(repository: Repository) -> None:
+    cuda = repository.save_environment(make_probe("cuda-env", backend="cuda_cpp"))
+    triton = repository.save_environment(make_probe("triton-env", backend="triton_python"))
+
+    assert repository.latest_environment("cuda_cpp").id == cuda.id  # type: ignore[union-attr]
+    assert repository.latest_environment("triton_python").id == triton.id  # type: ignore[union-attr]
 
 
 def test_version_metadata_can_change_without_mutating_snapshot(repository: Repository) -> None:

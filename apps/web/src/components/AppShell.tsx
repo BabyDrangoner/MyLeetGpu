@@ -21,7 +21,7 @@ export function AppShell() {
           </div>
           <div>
             <div className="brand-name">MyLeetGpu</div>
-            <div className="brand-tagline">CUDA 本地实验台</div>
+            <div className="brand-tagline">GPU Kernel 本地实验台</div>
           </div>
         </div>
 
