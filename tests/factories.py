@@ -13,15 +13,36 @@ def make_probe(
     healthy: bool = True,
     backend: str = "cuda_cpp",
 ) -> EnvironmentProbe:
+    python_backend = backend in {"triton_python", "torch_python"}
+    toolchain = (
+        {
+            "python_version": "3.11.10",
+            "torch_version": "2.5.1",
+            "torch_cuda_version": "12.4",
+            **({"triton_version": "3.1.0"} if backend == "triton_python" else {}),
+        }
+        if python_backend
+        else {}
+    )
     return EnvironmentProbe(
         healthy=healthy,
         gpu_name="NVIDIA GeForce RTX 4060" if healthy else None,
         compute_capability="8.9" if healthy else None,
         driver_version="999.1" if healthy else None,
         cuda_runtime_version="12.4" if healthy else None,
-        nvcc_version="Cuda compilation tools, release 12.4" if healthy else None,
-        cuda_image="nvidia/cuda:12.4.1-devel-ubuntu22.04",
-        image_digest="nvidia/cuda@sha256:" + "d" * 64 if healthy else None,
+        nvcc_version=(
+            "Cuda compilation tools, release 12.4" if healthy and not python_backend else None
+        ),
+        cuda_image=(
+            "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel"
+            if python_backend
+            else "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+        ),
+        image_digest=(
+            ("pytorch/pytorch@sha256:" if python_backend else "nvidia/cuda@sha256:") + "d" * 64
+            if healthy
+            else None
+        ),
         cuda_arch="89" if healthy else None,
         telemetry={
             "temperature_c": None,
@@ -32,16 +53,7 @@ def make_probe(
         error=None if healthy else "probe failed",
         fingerprint=fingerprint,
         backend=backend,
-        toolchain=(
-            {
-                "python_version": "3.11.10",
-                "torch_version": "2.5.1",
-                "triton_version": "3.1.0",
-                "torch_cuda_version": "12.4",
-            }
-            if backend == "triton_python"
-            else {}
-        ),
+        toolchain=toolchain,
     )
 
 

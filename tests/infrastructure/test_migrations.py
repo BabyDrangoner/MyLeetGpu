@@ -105,8 +105,15 @@ def test_kernel_language_migration_preserves_and_backfills_v1_data(
             """,
             ("triton-draft", "vector-addition", "triton_python", "python", now),
         )
+        connection.execute(
+            """
+            INSERT INTO drafts (id, problem_id, language, source_code, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("torch-draft", "vector-addition", "torch_python", "torch", now),
+        )
         assert connection.execute(
             "SELECT COUNT(*) FROM drafts WHERE problem_id = 'vector-addition'"
-        ).fetchone() == (2,)
+        ).fetchone() == (3,)
 
     reset_settings_cache()

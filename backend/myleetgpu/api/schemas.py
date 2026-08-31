@@ -7,12 +7,12 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from myleetgpu.domain.jobs import JobAction
 
-KernelLanguage = Literal["cuda_cpp", "triton_python"]
+KernelLanguage = Literal["cuda_cpp", "triton_python", "torch_python"]
 
 
 class JobCreate(BaseModel):
     problem_id: str = Field(min_length=1, max_length=128)
-    language: KernelLanguage = "cuda_cpp"
+    language: KernelLanguage | None = None
     action: JobAction
     source: str | None = None
     version_name: str | None = Field(default=None, max_length=120)
@@ -40,7 +40,7 @@ class JobResponse(BaseModel):
 
 
 class DraftUpdate(BaseModel):
-    language: KernelLanguage = "cuda_cpp"
+    language: KernelLanguage | None = None
     source: str = Field(min_length=1, max_length=262_144)
 
 

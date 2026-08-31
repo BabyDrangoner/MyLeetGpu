@@ -59,7 +59,7 @@ class FakeRunner:
         self.last_language = language
         if self.compile_failure is not None:
             return self.compile_failure
-        suffix = ".py" if language == "triton_python" else ""
+        suffix = ".py" if language in {"triton_python", "torch_python"} else ""
         executable = task_root / f"fake-{harness_kind}-program{suffix}"
         executable.write_bytes(b"not executed by this CPU-only test double")
         return CompileResult(True, "fake nvcc ok", executable, 0.01)
@@ -107,6 +107,10 @@ class FakeRunner:
         self.calls.append(("probe_triton_environment", force))
         return make_probe("fake-triton-env", backend="triton_python")
 
+    def probe_torch_environment(self, *, force: bool = False):
+        self.calls.append(("probe_torch_environment", force))
+        return make_probe("fake-torch-env", backend="torch_python")
+
     @staticmethod
     def effective_compile_flags(
         problem: Problem,
@@ -117,6 +121,12 @@ class FakeRunner:
     ) -> list[str]:
         if language == "triton_python":
             return ["backend=triton_python", "triton=3.1.0", f"arch=sm_{probe.cuda_arch}"]
+        if language == "torch_python":
+            return [
+                "backend=torch_python",
+                "policy=restricted_torch_v1",
+                f"arch=sm_{probe.cuda_arch}",
+            ]
         return [*problem.compile_flags, f"-arch=sm_{probe.cuda_arch}"]
 
     def cleanup_task(self, task_root: Path) -> None:
@@ -267,6 +277,48 @@ def test_triton_save_version_uses_python_backend_and_persists_language(
     assert all(call[4] == "triton_python" for call in compile_calls)
     execute_calls = [call for call in runner.calls if call[0] == "execute"]
     assert all(call[5] == "triton_python" for call in execute_calls)
+
+
+def test_torch_only_default_save_uses_torch_probe_and_persists_runtime_identity(
+    worker_bundle,
+) -> None:
+    _, repository, service, runner, worker = worker_bundle
+    source = (
+        "import torch\n\n"
+        "def solve(query, key, value, attention_mask):\n"
+        "    return torch.matmul(query, value.transpose(-2, -1))\n"
+    )
+    submitted = service.submit(
+        problem_id="multi-head-attention",
+        action=JobAction.SAVE_VERSION,
+        source=source,
+        version_name="torch baseline",
+    )
+
+    assert submitted.language == "torch_python"
+    assert worker.process_next()
+
+    completed = repository.get_job(submitted.id)
+    assert completed is not None and completed.status == "succeeded"
+    version = repository.get_version(completed.result_json["version_id"])  # type: ignore[index]
+    assert version is not None
+    assert version.language == "torch_python"
+    assert version.source_code == source
+    assert version.environment.backend == "torch_python"
+    assert version.compile_flags_json == [
+        "backend=torch_python",
+        "policy=restricted_torch_v1",
+        "arch=sm_89",
+    ]
+    probe_calls = [call for call in runner.calls if str(call[0]).startswith("probe_")]
+    assert probe_calls == [
+        ("probe_torch_environment", False),
+        ("probe_torch_environment", True),
+    ]
+    compile_calls = [call for call in runner.calls if call[0] == "compile"]
+    assert all(call[4] == "torch_python" for call in compile_calls)
+    execute_calls = [call for call in runner.calls if call[0] == "execute"]
+    assert all(call[5] == "torch_python" for call in execute_calls)
 
 
 def test_compile_failure_does_not_execute_or_create_version(worker_bundle) -> None:

@@ -59,11 +59,13 @@ def test_draft_upsert_keeps_one_mutable_record_per_problem(repository: Repositor
 def test_drafts_are_isolated_by_problem_and_kernel_language(repository: Repository) -> None:
     cuda = repository.upsert_draft("vector-addition", "cuda source", "cuda_cpp")
     triton = repository.upsert_draft("vector-addition", "triton source", "triton_python")
+    torch = repository.upsert_draft("vector-addition", "torch source", "torch_python")
 
-    assert cuda.id != triton.id
+    assert len({cuda.id, triton.id, torch.id}) == 3
     assert repository.get_draft("vector-addition", "cuda_cpp").source_code == "cuda source"  # type: ignore[union-attr]
     assert repository.get_draft("vector-addition", "triton_python").source_code == "triton source"  # type: ignore[union-attr]
-    assert repository.counts()["drafts"] == 2
+    assert repository.get_draft("vector-addition", "torch_python").source_code == "torch source"  # type: ignore[union-attr]
+    assert repository.counts()["drafts"] == 3
 
 
 def test_claim_next_job_is_fifo_and_atomic(repository: Repository) -> None:
@@ -326,6 +328,14 @@ def test_duplicate_lookup_and_version_listing_are_language_scoped(
         language="triton_python",
         compile_flags=("backend=triton_python",),
     )
+    torch = create_saved_version(
+        repository,
+        name="torch",
+        source="same text",
+        source_digest="e" * 64,
+        language="torch_python",
+        compile_flags=("backend=torch_python",),
+    )
 
     assert [
         item.id
@@ -341,14 +351,23 @@ def test_duplicate_lookup_and_version_listing_are_language_scoped(
     assert [item.id for item in repository.list_versions("vector-addition", "triton_python")] == [
         triton.id
     ]
+    assert [
+        item.id
+        for item in repository.find_duplicate_versions("vector-addition", "e" * 64, "torch_python")
+    ] == [torch.id]
+    assert [item.id for item in repository.list_versions("vector-addition", "torch_python")] == [
+        torch.id
+    ]
 
 
 def test_latest_environment_can_be_selected_per_backend(repository: Repository) -> None:
     cuda = repository.save_environment(make_probe("cuda-env", backend="cuda_cpp"))
     triton = repository.save_environment(make_probe("triton-env", backend="triton_python"))
+    torch = repository.save_environment(make_probe("torch-env", backend="torch_python"))
 
     assert repository.latest_environment("cuda_cpp").id == cuda.id  # type: ignore[union-attr]
     assert repository.latest_environment("triton_python").id == triton.id  # type: ignore[union-attr]
+    assert repository.latest_environment("torch_python").id == torch.id  # type: ignore[union-attr]
 
 
 def test_version_metadata_can_change_without_mutating_snapshot(repository: Repository) -> None:

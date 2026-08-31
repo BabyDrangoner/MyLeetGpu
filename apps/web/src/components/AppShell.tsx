@@ -21,7 +21,7 @@ export function AppShell() {
           </div>
           <div>
             <div className="brand-name">MyLeetGpu</div>
-            <div className="brand-tagline">GPU Kernel 本地实验台</div>
+            <div className="brand-tagline">高性能计算本地实验台</div>
           </div>
         </div>
 
@@ -64,7 +64,7 @@ export function AppShell() {
           <div className="local-pill">
             <Activity size={14} /> {localMode ? '127.0.0.1 · 本地模式' : `${hostname} · 认证局域网`}
           </div>
-          <div className="topbar-note">编译与 GPU 任务串行、安全隔离执行</div>
+          <div className="topbar-note">代码检查、编译与计算任务串行、安全隔离执行</div>
         </header>
         <div className="route-content">
           <Outlet />

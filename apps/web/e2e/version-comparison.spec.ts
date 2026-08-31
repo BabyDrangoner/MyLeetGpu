@@ -40,6 +40,18 @@ test('groups saved versions by language and never selects cross-language baselin
   await expect(page.getByText('可直接比较')).toBeVisible()
 })
 
+test('compares PyTorch attention versions with Python diff and PyTorch toolchain metadata', async ({ page }) => {
+  await installMockApi(page, { comparable: true, torchVersions: true })
+  await page.goto('/problems/multi-head-attention/versions?language=torch_python')
+
+  await expect(page.getByRole('button', { name: /PyTorch \(Python\) 2/ })).toHaveClass(/active/)
+  await expect(page.locator('.version-row')).toHaveCount(2)
+  await expect(page.getByText('可直接比较')).toBeVisible()
+  await expect(page.getByText('PyTorch 2.5.1+cu124 / Python 3.11.10 / Torch CUDA 12.6').first()).toBeVisible()
+  await expect(page.locator('.monaco-diff-editor')).toBeVisible()
+  await expect(page.getByText('NVCC', { exact: true })).toHaveCount(0)
+})
+
 test('edits metadata and requires the destructive second confirmation', async ({ page }) => {
   const state = await installMockApi(page, { versions: true, comparable: true })
   await page.goto('/problems/vector-addition/versions')

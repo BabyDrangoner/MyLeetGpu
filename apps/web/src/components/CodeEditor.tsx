@@ -1,5 +1,6 @@
 import Editor, { DiffEditor, type BeforeMount } from '@monaco-editor/react'
 import type { KernelLanguage } from '../domain/types'
+import { languageMetadata } from '../lib/languages'
 import '../monaco'
 
 const configure: BeforeMount = (monaco) => {
@@ -27,10 +28,6 @@ const configure: BeforeMount = (monaco) => {
 
 const isTest = typeof navigator !== 'undefined' && navigator.userAgent.toLowerCase().includes('jsdom')
 
-const editorMetadata = (language: KernelLanguage) => language === 'triton_python'
-  ? { monacoLanguage: 'python', fileName: 'solution.py', label: 'Triton Python' }
-  : { monacoLanguage: 'cpp', fileName: 'solution.cu', label: 'CUDA C++' }
-
 export function CodeEditor({ value, language, problemId, onChange, readOnly = false }: {
   value: string
   language: KernelLanguage
@@ -38,16 +35,17 @@ export function CodeEditor({ value, language, problemId, onChange, readOnly = fa
   onChange?: (value: string) => void
   readOnly?: boolean
 }) {
-  const metadata = editorMetadata(language)
+  const metadata = languageMetadata[language]
+  const modelPath = `/problems/${encodeURIComponent(problemId)}/${language}/${metadata.fileName}`
   if (isTest) {
-    return <textarea aria-label={`${metadata.label} 代码编辑器`} data-editor-language={metadata.monacoLanguage} data-editor-path={metadata.fileName} className="test-code-editor" value={value} readOnly={readOnly} onChange={(event) => onChange?.(event.target.value)} />
+    return <textarea aria-label={`${metadata.label} 代码编辑器`} data-editor-language={metadata.editorLanguage} data-editor-path={modelPath} className="test-code-editor" value={value} readOnly={readOnly} onChange={(event) => onChange?.(event.target.value)} />
   }
   return (
     <Editor
       beforeMount={configure}
       height="100%"
-      language={metadata.monacoLanguage}
-      path={`/problems/${encodeURIComponent(problemId)}/${metadata.fileName}`}
+      language={metadata.editorLanguage}
+      path={modelPath}
       theme="myleetgpu-dark"
       value={value}
       onChange={(next) => onChange?.(next ?? '')}
@@ -78,15 +76,15 @@ export function CodeDiff({ original, modified, language, originalLabel, modified
   originalLabel?: string
   modifiedLabel?: string
 }) {
-  const metadata = editorMetadata(language)
+  const metadata = languageMetadata[language]
   if (isTest) {
-    return <div className="test-diff" data-editor-language={metadata.monacoLanguage}><pre aria-label={originalLabel}>{original}</pre><pre aria-label={modifiedLabel}>{modified}</pre></div>
+    return <div className="test-diff" data-editor-language={metadata.editorLanguage}><pre aria-label={originalLabel}>{original}</pre><pre aria-label={modifiedLabel}>{modified}</pre></div>
   }
   return (
     <DiffEditor
       beforeMount={configure}
       height="100%"
-      language={metadata.monacoLanguage}
+      language={metadata.editorLanguage}
       theme="myleetgpu-dark"
       original={original}
       modified={modified}

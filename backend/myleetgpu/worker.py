@@ -489,7 +489,11 @@ class Worker:
     def _require_compile(result: CompileResult, language: str = "cuda_cpp") -> None:
         if result.succeeded:
             return
-        toolchain = "Triton/Python 提交策略预检" if language == "triton_python" else "NVCC 编译"
+        toolchain = {
+            KernelLanguage.CUDA_CPP.value: "NVCC 编译",
+            KernelLanguage.TRITON_PYTHON.value: "Triton/Python 提交策略预检",
+            KernelLanguage.TORCH_PYTHON.value: "PyTorch/Python 提交策略预检",
+        }.get(language, "提交预检")
         if result.timed_out:
             code, message = ErrorCode.TIMEOUT, f"{toolchain}超时"
         elif result.output_limited:
@@ -524,7 +528,7 @@ class Worker:
         elif result.parsed and result.parsed.get("status") == "compile_error":
             error = JobError(
                 code=ErrorCode.COMPILE_ERROR,
-                message="Triton GPU 专化编译失败",
+                message="运行时编译或提交策略检查失败",
                 stage=stage,
                 details={"result": {"status": "compile_error"}},
             )
@@ -734,6 +738,8 @@ class Worker:
     def _probe_for_language(self, language: str, *, force: bool) -> EnvironmentProbe:
         if language == KernelLanguage.TRITON_PYTHON.value:
             return self.runner.probe_triton_environment(force=force)
+        if language == KernelLanguage.TORCH_PYTHON.value:
+            return self.runner.probe_torch_environment(force=force)
         return self.runner.probe_environment(force=force)
 
     def _require_runtime_environment(self, language: str) -> EnvironmentProbe:

@@ -14,12 +14,9 @@ import { useAsync } from '../hooks/useAsync'
 import { useJob } from '../hooks/useJob'
 import { readLocalDraft, saveLocalDraft } from '../lib/drafts'
 import { difficultyLabel, formatDate } from '../lib/format'
+import { implementationLanguages, isKernelLanguage, languageLabel } from '../lib/languages'
 
 const difficultyClass = (difficulty: string) => difficulty.includes('困难') || difficulty === 'hard' ? 'hard' : difficulty.includes('中等') || difficulty === 'medium' ? 'medium' : 'easy'
-const kernelLanguages: KernelLanguage[] = ['cuda_cpp', 'triton_python']
-
-const isKernelLanguage = (value: string | null): value is KernelLanguage => value === 'cuda_cpp' || value === 'triton_python'
-const languageLabel = (language: KernelLanguage) => language === 'triton_python' ? 'Triton (Python)' : 'CUDA C++'
 
 export function WorkspacePage() {
   const { slug = '' } = useParams()
@@ -41,7 +38,7 @@ export function WorkspacePage() {
 
   const supportedLanguages = useMemo(() => {
     const implementations = problem.data?.implementations
-    return kernelLanguages.filter((language) => implementations?.[language])
+    return implementationLanguages.filter((language) => implementations?.[language])
   }, [problem.data])
   const requestedLanguage = searchParams.get('language')
   const language = isKernelLanguage(requestedLanguage) && supportedLanguages.includes(requestedLanguage)
@@ -174,7 +171,7 @@ export function WorkspacePage() {
     }
   }
 
-  if (problem.loading) return <div className="page"><StatusView kind="loading" title="正在打开 Kernel 工作台" /></div>
+  if (problem.loading) return <div className="page"><StatusView kind="loading" title="正在打开编程工作台" /></div>
   if (problem.error || !problem.data) {
     return <div className="page"><StatusView kind="error" description={problem.error?.message ?? '题目不存在。'} action={<RetryButton onClick={() => void problem.reload()} />} /></div>
   }
@@ -224,7 +221,7 @@ export function WorkspacePage() {
               <div className="protocol-content">
                 <div className="protocol-callout">
                   <Clock3 size={20} />
-                  <div><strong>平台 harness 计时</strong><p>排除编译、容器启动、初始化、分配和拷贝；先预热，再用 CUDA Events 采样。</p></div>
+                  <div><strong>平台 harness 计时</strong><p>排除编译或预检查、容器启动、初始化、分配和拷贝；先预热，再用设备事件采样。</p></div>
                 </div>
                 <dl>
                   <div><dt>输入规模</dt><dd>{detail.benchmark?.input_sizes?.join(' / ') ?? '由题目配置'}</dd></div>
@@ -243,7 +240,7 @@ export function WorkspacePage() {
           <div className="editor-panel panel">
             <div className="editor-toolbar">
               <div className="file-label"><Braces size={16} /><strong>solution{activeImplementation.file_extension}</strong><span>{activeImplementation.display_name}</span></div>
-              <div className="language-switch" role="group" aria-label="Kernel 语言">
+              <div className="language-switch" role="group" aria-label="实现语言">
                 {supportedLanguages.map((item) => (
                   <button key={item} className={language === item ? 'active' : ''} type="button" disabled={jobs.busy || saveOpen} onClick={() => selectLanguage(item)}>{languageLabel(item)}</button>
                 ))}
@@ -257,7 +254,7 @@ export function WorkspacePage() {
             <div className="editor-space"><CodeEditor value={source} language={language} problemId={slug} readOnly={!draftReady} onChange={updateSource} /></div>
             <div className="action-bar">
               <div className="action-group">
-                <button className="button secondary" disabled={jobs.busy || !draftReady} type="button" onClick={() => void startAction('compile')}><Settings2 size={16} />编译</button>
+                <button className="button secondary" disabled={jobs.busy || !draftReady} type="button" onClick={() => void startAction('compile')}><Settings2 size={16} />{language === 'torch_python' ? '代码检查' : '编译'}</button>
                 <button className="button secondary" disabled={jobs.busy || !draftReady} type="button" onClick={() => void startAction('run')}><Play size={16} />运行样例</button>
                 <button className="button secondary" disabled={jobs.busy || !draftReady} type="button" onClick={() => void startAction('validate')}><FileCheck2 size={16} />完整验证</button>
               </div>

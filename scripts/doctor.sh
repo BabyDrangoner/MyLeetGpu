@@ -7,6 +7,7 @@ FAILURES=0
 WARNINGS=0
 CUDA_ARCH=""
 TRITON_READY=0
+TORCH_READY=0
 
 pass() { printf '[PASS] %s\n' "$1"; }
 fail() { printf '[FAIL] %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
@@ -75,6 +76,13 @@ else
   fi
   if docker image inspect "$TRITON_IMAGE" >/dev/null 2>&1 || docker pull "$TRITON_IMAGE"; then
     TRITON_DIGEST="$(docker image inspect --format '{{index .RepoDigests 0}}' "$TRITON_IMAGE" 2>/dev/null || true)"
+    if TORCH_INFO="$(docker run --rm --gpus device=0 --network none --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,nosuid,nodev,noexec,size=512m --env HOME=/tmp --entrypoint python "$TRITON_IMAGE" -I -B -c 'import platform, torch; print(f"Python {platform.python_version()} / Torch {torch.__version__} / CUDA {torch.version.cuda} / GPU {torch.cuda.get_device_name(0)}")' 2>&1)"; then
+      pass "PyTorch 镜像可用：${TRITON_DIGEST:-$TRITON_IMAGE}"
+      pass "PyTorch 工具链：$TORCH_INFO"
+      TORCH_READY=1
+    else
+      fail "固定 PyTorch 容器无法加载 GPU 工具链：$TORCH_INFO"
+    fi
     if TRITON_INFO="$(docker run --rm --gpus device=0 --network none --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,nosuid,nodev,exec,size=512m --env HOME=/tmp --entrypoint python "$TRITON_IMAGE" -I -B -c 'import platform, torch, triton; print(f"Python {platform.python_version()} / Torch {torch.__version__} / Triton {triton.__version__} / CUDA {torch.version.cuda} / GPU {torch.cuda.get_device_name(0)}")' 2>&1)"; then
       pass "Triton 镜像可用：${TRITON_DIGEST:-$TRITON_IMAGE}"
       pass "Triton 工具链：$TRITON_INFO"
@@ -137,6 +145,24 @@ if not torch.equal(output_tensor, input_tensor + 1.0):
     raise SystemExit("wrong Triton result")
 print(f"value={output_tensor[-1].item():.0f} triton={triton.__version__} torch={torch.__version__}")
 PYTHON
+  cat >"$TMP_DIR/torch_doctor.py" <<'PYTHON'
+import torch
+
+
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+torch.set_float32_matmul_precision("highest")
+torch.use_deterministic_algorithms(True)
+query = torch.arange(64, device="cuda", dtype=torch.float32).reshape(1, 2, 4, 8) / 64
+key = torch.flip(query, dims=(-2,))
+value = query + 0.25
+scores = torch.matmul(query, key.transpose(-2, -1)) * (query.shape[-1] ** -0.5)
+output = torch.matmul(torch.softmax(scores, dim=-1), value)
+torch.cuda.synchronize()
+if output.shape != query.shape or not bool(torch.all(torch.isfinite(output))):
+    raise SystemExit("wrong PyTorch attention result")
+print(f"shape={tuple(output.shape)} torch={torch.__version__} cuda={torch.version.cuda}")
+PYTHON
   chmod 0777 "$TMP_DIR"
   if docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 65534:65534 --tmpfs /tmp:rw,nosuid,nodev,size=64m --mount "type=bind,src=$TMP_DIR,dst=/work" "$CUDA_IMAGE" nvcc -arch="$CUDA_ARCH" /work/doctor.cu -o /work/doctor >"$TMP_DIR/compile.log" 2>&1 \
     && RESULT="$(docker run --rm --gpus device=0 --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 65534:65534 --tmpfs /tmp:rw,nosuid,nodev,size=64m --mount "type=bind,src=$TMP_DIR,dst=/work,readonly" "$CUDA_IMAGE" /work/doctor 2>&1)" \
@@ -145,6 +171,13 @@ PYTHON
     pass "最小 CUDA 程序在真实 GPU 上编译并运行：$RESULT_LINE"
   else
     fail "最小 CUDA 程序失败：$(tail -8 "$TMP_DIR/compile.log" 2>/dev/null || true) ${RESULT:-}"
+  fi
+  if [ "$TORCH_READY" -eq 1 ]; then
+    if TORCH_RESULT="$(docker run --rm --gpus device=0 --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 65534:65534 --tmpfs /tmp:rw,nosuid,nodev,noexec,size=512m --env HOME=/tmp --env CUBLAS_WORKSPACE_CONFIG=:4096:8 --env NVIDIA_TF32_OVERRIDE=0 --mount "type=bind,src=$TMP_DIR,dst=/work,readonly" --entrypoint python "$TRITON_IMAGE" -I -B /work/torch_doctor.py 2>&1)"; then
+      pass "最小 PyTorch attention 在真实 GPU 上运行：$TORCH_RESULT"
+    else
+      fail "最小 PyTorch attention 失败：$TORCH_RESULT"
+    fi
   fi
   if [ "$TRITON_READY" -eq 1 ]; then
     if TRITON_RESULT="$(docker run --rm --gpus device=0 --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 65534:65534 --tmpfs /tmp:rw,nosuid,nodev,exec,size=512m --env HOME=/tmp --env TRITON_CACHE_DIR=/tmp/triton-cache --mount "type=bind,src=$TMP_DIR,dst=/work,readonly" --entrypoint python "$TRITON_IMAGE" -I -B /work/triton_doctor.py 2>&1)"; then

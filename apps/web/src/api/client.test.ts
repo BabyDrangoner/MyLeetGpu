@@ -34,20 +34,38 @@ describe('API contract adapter', () => {
     expect(problem.benchmark?.input_sizes).toEqual(['64K', '1M'])
   })
 
-  it('normalizes CUDA C++ and Triton implementations without losing language metadata', async () => {
+  it('normalizes CUDA C++, Triton and PyTorch implementations without losing language metadata', async () => {
     fetchMock.mockResolvedValue(json({
       slug: 'vector-addition', title: '向量逐元素相加', difficulty: 'easy', revision: '2', summary: '双语言题目',
       default_language: 'triton_python', statement_markdown: '# 题目',
       implementations: {
         cuda_cpp: { display_name: 'CUDA C++', file_extension: '.cu', editor_language: 'cpp', starter_code: '// cuda', signature: { declaration: 'void solve()' } },
         triton_python: { display_name: 'Triton (Python)', source_suffix: '.py', editor_language: 'python', starter_code: '# triton', signature: { declaration: 'def solve(...)' } },
+        torch_python: { display_name: 'PyTorch (Python)', source_suffix: '.py', editor_language: 'python', starter_code: '# torch', signature: { declaration: 'def solve(q, k, v)' } },
       },
     }))
 
     const problem = await api.problems.get('vector-addition')
     expect(problem.default_language).toBe('triton_python')
-    expect(problem.languages).toEqual(['cuda_cpp', 'triton_python'])
+    expect(problem.languages).toEqual(['cuda_cpp', 'triton_python', 'torch_python'])
     expect(problem.implementations.triton_python).toMatchObject({ editor_language: 'python', file_extension: '.py', starter_code: '# triton', signature: 'def solve(...)' })
+    expect(problem.implementations.torch_python).toMatchObject({ display_name: 'PyTorch (Python)', editor_language: 'python', file_extension: '.py', starter_code: '# torch', signature: 'def solve(q, k, v)' })
+  })
+
+  it('keeps a torch-only problem on its declared default instead of falling back to CUDA', async () => {
+    fetchMock.mockResolvedValue(json({
+      slug: 'multi-head-attention', title: '多头注意力', difficulty: 'medium', revision: '1', summary: 'PyTorch 题',
+      default_language: 'torch_python', statement_markdown: '# Attention',
+      implementations: {
+        torch_python: { starter_code: 'import torch\n\ndef solve(): ...', signature: { declaration: 'def solve(q, k, v)' } },
+      },
+    }))
+
+    const problem = await api.problems.get('multi-head-attention')
+    expect(problem.default_language).toBe('torch_python')
+    expect(problem.languages).toEqual(['torch_python'])
+    expect(problem.implementations.torch_python).toMatchObject({ display_name: 'PyTorch (Python)', editor_language: 'python', file_extension: '.py' })
+    expect(problem.implementations.cuda_cpp).toBeUndefined()
   })
 
   it('normalizes jobs, environment snapshots and backend UTC timestamps', async () => {
@@ -93,17 +111,28 @@ describe('API contract adapter', () => {
 
   it('scopes draft and duplicate requests by implementation language', async () => {
     fetchMock
-      .mockResolvedValueOnce(json({ problem_id: 'vector-addition', language: 'triton_python', source: '# draft', updated_at: '2026-08-16T01:00:00Z' }))
-      .mockResolvedValueOnce(json({ problem_id: 'vector-addition', language: 'triton_python', source: '# saved', updated_at: '2026-08-16T01:01:00Z' }))
+      .mockResolvedValueOnce(json({ problem_id: 'multi-head-attention', language: 'torch_python', source: '# draft', updated_at: '2026-08-16T01:00:00Z' }))
+      .mockResolvedValueOnce(json({ problem_id: 'multi-head-attention', language: 'torch_python', source: '# saved', updated_at: '2026-08-16T01:01:00Z' }))
       .mockResolvedValueOnce(json({ items: [] }))
 
-    await api.drafts.get('vector-addition', 'triton_python')
-    await api.drafts.save('vector-addition', 'triton_python', '# saved')
-    await api.versions.findDuplicates('vector-addition', 'triton_python', 'a'.repeat(64))
+    await api.drafts.get('multi-head-attention', 'torch_python')
+    await api.drafts.save('multi-head-attention', 'torch_python', '# saved')
+    await api.versions.findDuplicates('multi-head-attention', 'torch_python', 'a'.repeat(64))
 
-    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/drafts/vector-addition?language=triton_python', expect.any(Object))
-    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/drafts/vector-addition', expect.objectContaining({ method: 'PUT', body: JSON.stringify({ language: 'triton_python', source: '# saved' }) }))
-    expect(fetchMock).toHaveBeenNthCalledWith(3, expect.stringContaining('language=triton_python'), expect.any(Object))
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/drafts/multi-head-attention?language=torch_python', expect.any(Object))
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/drafts/multi-head-attention', expect.objectContaining({ method: 'PUT', body: JSON.stringify({ language: 'torch_python', source: '# saved' }) }))
+    expect(fetchMock).toHaveBeenNthCalledWith(3, expect.stringContaining('language=torch_python'), expect.any(Object))
+  })
+
+  it('normalizes the PyTorch runtime and preserves the requested backend fallback', async () => {
+    fetchMock.mockResolvedValue(json({
+      healthy: true,
+      toolchain: { python_version: '3.11.10', torch_version: '2.5.1', torch_cuda_version: '12.4' },
+    }))
+
+    const environment = await api.environment('torch_python')
+    expect(fetchMock).toHaveBeenCalledWith('/api/environment?language=torch_python', expect.any(Object))
+    expect(environment).toMatchObject({ backend: 'torch_python', python_version: '3.11.10', torch_version: '2.5.1', torch_cuda_version: '12.4' })
   })
 
   it('sends the server-required second-confirmation flag when deleting', async () => {

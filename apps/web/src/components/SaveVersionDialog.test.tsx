@@ -1,6 +1,6 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import type { SavedVersion } from '../domain/types'
 import { sourceHash } from '../lib/hash'
@@ -10,6 +10,7 @@ vi.mock('../api/client', () => ({
   api: { versions: { findDuplicates: vi.fn().mockResolvedValue([]) } },
 }))
 vi.mock('../lib/hash', () => ({ sourceHash: vi.fn().mockResolvedValue('same-hash') }))
+afterEach(cleanup)
 
 const existing: SavedVersion = {
   id: 'v1',
@@ -61,5 +62,28 @@ describe('SaveVersionDialog', () => {
       language: 'cuda_cpp',
       allowDuplicate: true,
     })))
+  })
+
+  it('shows and submits the PyTorch implementation language', async () => {
+    const onSave = vi.fn()
+    const user = userEvent.setup()
+    render(
+      <SaveVersionDialog
+        open
+        problemId="multi-head-attention"
+        language="torch_python"
+        snapshot="def solve(q, k, v): ..."
+        currentSource="def solve(q, k, v): ..."
+        existingVersions={[]}
+        busy={false}
+        onClose={vi.fn()}
+        onSave={onSave}
+      />,
+    )
+
+    expect(await screen.findByText(/PyTorch \(Python\).*SHA-256/)).toBeInTheDocument()
+    await user.type(screen.getByPlaceholderText('例如：共享内存分块 v2'), 'Attention baseline')
+    await user.click(screen.getByRole('button', { name: '验证、测速并保存' }))
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ language: 'torch_python', source: 'def solve(q, k, v): ...' }))
   })
 })

@@ -1,0 +1,223 @@
+schema_version: 2
+slug: multi-head-attention
+title: 多头缩放点积注意力
+difficulty: medium
+revision: 1
+default_language: torch_python
+
+implementations:
+  torch_python:
+    language: torch_python
+    starter: torch/starter.py
+    statement_appendix: instructions/torch_python.md
+    signature:
+      symbol: solve
+      declaration: "def solve(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor"
+    harness:
+      validator: torch/harness/validator.py
+      benchmark: torch/harness/benchmark.py
+    runtime:
+      profile: torch_cuda_v1
+      executable: python3
+      syntax_check: py_compile
+
+types:
+  inputs:
+    - name: query
+      type: float32
+      shape: [batch, heads, query_length, head_dim]
+      layout: contiguous
+      memory: device
+      access: read_only
+    - name: key
+      type: float32
+      shape: [batch, heads, key_length, head_dim]
+      layout: contiguous
+      memory: device
+      access: read_only
+    - name: value
+      type: float32
+      shape: [batch, heads, key_length, head_dim]
+      layout: contiguous
+      memory: device
+      access: read_only
+    - name: attention_mask
+      type: bool
+      shape: [batch, 1, query_length, key_length]
+      layout: contiguous
+      memory: device
+      access: read_only
+  outputs:
+    - name: output
+      type: float32
+      shape: [batch, heads, query_length, head_dim]
+      memory: device
+      access: return_value
+
+constraints:
+  batch:
+    min: 1
+    max: 4
+  heads:
+    min: 1
+    max: 32
+  query_length:
+    min: 1
+    max: 1024
+  key_length:
+    min: 1
+    max: 1024
+  head_dim:
+    min: 1
+    max: 128
+  values:
+    finite: true
+  attention_mask:
+    true_means: participates_in_attention
+    at_least_one_true_per_query: true
+  scaling: inverse_sqrt_head_dim
+  dropout: 0.0
+  aliasing: output_must_not_alias_inputs
+  input_mutation: forbidden
+
+tolerance:
+  mode: float
+  atol: 0.0002
+  rtol: 0.0002
+  nan_equal: false
+  infinity: same_sign
+
+public:
+  seed: 230901
+  timeout_ms: 15000
+  cases:
+    - name: sample_handcrafted
+      batch: 1
+      heads: 2
+      query_length: 2
+      key_length: 3
+      head_dim: 4
+      pattern: sequence
+      mask_pattern: all
+    - name: sample_padding_mask
+      batch: 2
+      heads: 4
+      query_length: 5
+      key_length: 7
+      head_dim: 8
+      pattern: random
+      mask_pattern: prefix
+    - name: sample_causal_mask
+      batch: 1
+      heads: 3
+      query_length: 9
+      key_length: 9
+      head_dim: 16
+      pattern: random
+      mask_pattern: causal
+
+internal:
+  seeds: [314159, 271828, 1618033]
+  timeout_ms: 60000
+  cases:
+    - name: internal_case_1
+      category: boundary
+      batch: 1
+      heads: 1
+      query_length: 1
+      key_length: 1
+      head_dim: 1
+      pattern: constant
+      mask_pattern: all
+    - name: internal_case_2
+      category: boundary
+      batch: 2
+      heads: 1
+      query_length: 1
+      key_length: 17
+      head_dim: 3
+      pattern: random
+      mask_pattern: prefix
+    - name: internal_case_3
+      category: boundary
+      batch: 2
+      heads: 4
+      query_length: 7
+      key_length: 11
+      head_dim: 16
+      pattern: random
+      mask_pattern: single_key
+    - name: internal_case_4
+      category: boundary
+      batch: 1
+      heads: 7
+      query_length: 33
+      key_length: 33
+      head_dim: 24
+      pattern: random
+      mask_pattern: causal
+    - name: internal_case_5
+      category: invariant
+      batch: 1
+      heads: 4
+      query_length: 5
+      key_length: 6
+      head_dim: 8
+      pattern: head_markers
+      mask_pattern: staggered
+    - name: internal_case_6
+      category: numerical
+      batch: 1
+      heads: 4
+      query_length: 17
+      key_length: 19
+      head_dim: 64
+      pattern: extreme_logits
+      mask_pattern: staggered
+    - name: internal_case_7
+      category: random
+      batch: 2
+      heads: 8
+      query_length: 65
+      key_length: 97
+      head_dim: 32
+      pattern: random
+      mask_pattern: prefix
+
+benchmark:
+  protocol_version: "1"
+  suite_seed: 20260831
+  sizes:
+    - label: B1-H8-Q128-K128-D64
+      batch: 1
+      heads: 8
+      query_length: 128
+      key_length: 128
+      head_dim: 64
+      mask_pattern: all
+      inner_repetitions: 8
+    - label: B2-H12-Q384-K512-D64
+      batch: 2
+      heads: 12
+      query_length: 384
+      key_length: 512
+      head_dim: 64
+      mask_pattern: prefix
+      inner_repetitions: 1
+    - label: B1-H16-Q1024-K1024-D64
+      batch: 1
+      heads: 16
+      query_length: 1024
+      key_length: 1024
+      head_dim: 64
+      mask_pattern: causal
+      inner_repetitions: 1
+  warmup: 5
+  iterations: 20
+  timeout_ms: 120000
+
+timeouts:
+  compile_ms: 30000
+  public_ms: 15000
+  validation_ms: 60000
+  benchmark_ms: 120000

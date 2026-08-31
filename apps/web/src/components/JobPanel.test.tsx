@@ -1,6 +1,8 @@
-import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { cleanup, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it } from 'vitest'
 import { JobPanel } from './JobPanel'
+
+afterEach(cleanup)
 
 describe('JobPanel', () => {
   it('shows timeout as a distinct terminal state', () => {
@@ -27,5 +29,13 @@ describe('JobPanel', () => {
     render(<JobPanel job={{ id: 'job-triton', language: 'triton_python', action: 'compile', status: 'failed', diagnostics: 'solution.py:4: SyntaxError' }} />)
     expect(screen.getByText('Triton / Python 诊断')).toBeInTheDocument()
     expect(screen.queryByText('NVCC 诊断')).not.toBeInTheDocument()
+  })
+
+  it('labels PyTorch checks without falling back to CUDA or Triton', () => {
+    render(<JobPanel job={{ id: 'job-torch', language: 'torch_python', action: 'compile', status: 'failed', diagnostics: 'solution.py:8: NameError' }} />)
+    expect(screen.getByText('Python / PyTorch 诊断')).toBeInTheDocument()
+    expect(screen.getByText('PyTorch')).toBeInTheDocument()
+    expect(screen.queryByText('NVCC 诊断')).not.toBeInTheDocument()
+    expect(screen.queryByText('Triton / Python 诊断')).not.toBeInTheDocument()
   })
 })

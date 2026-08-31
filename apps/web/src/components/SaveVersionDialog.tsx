@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../api/client'
 import type { KernelLanguage, SavedVersion } from '../domain/types'
 import { sourceHash } from '../lib/hash'
+import { languageLabel } from '../lib/languages'
 import { Modal } from './Modal'
 
 export interface SaveVersionPayload {
@@ -90,7 +91,7 @@ export function SaveVersionDialog({
         <Camera size={18} />
         <div>
           <strong>已锁定点击时的代码快照</strong>
-          <span>{language === 'triton_python' ? 'Triton (Python)' : 'CUDA C++'} · {snapshot.split('\n').length} 行 · SHA-256 {hash ? hash.slice(0, 12) : '计算中…'}</span>
+          <span>{languageLabel(language)} · {snapshot.split('\n').length} 行 · SHA-256 {hash ? hash.slice(0, 12) : '计算中…'}</span>
         </div>
       </div>
       {currentSource !== snapshot && (

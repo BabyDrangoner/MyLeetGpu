@@ -1,6 +1,6 @@
 export type Difficulty = '入门' | '简单' | '中等' | '困难' | string
 
-export type KernelLanguage = 'cuda_cpp' | 'triton_python'
+export type KernelLanguage = 'cuda_cpp' | 'triton_python' | 'torch_python'
 export type EditorLanguage = 'cpp' | 'python'
 
 export interface ProblemImplementation {
@@ -129,6 +129,7 @@ export interface BenchmarkMetric {
 
 export interface EnvironmentSnapshot {
   id?: string
+  backend?: KernelLanguage
   healthy?: boolean
   status?: string
   gpu_name?: string
@@ -140,6 +141,7 @@ export interface EnvironmentSnapshot {
   nvcc_version?: string
   python_version?: string
   torch_version?: string
+  torch_cuda_version?: string
   triton_version?: string
   container_image?: string
   container_digest?: string

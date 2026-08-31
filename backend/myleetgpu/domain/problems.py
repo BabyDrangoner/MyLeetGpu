@@ -13,6 +13,7 @@ from myleetgpu.domain.benchmark import suite_hash
 class KernelLanguage(StrEnum):
     CUDA_CPP = "cuda_cpp"
     TRITON_PYTHON = "triton_python"
+    TORCH_PYTHON = "torch_python"
 
 
 class StrictManifestModel(BaseModel):
@@ -25,9 +26,13 @@ class SignatureManifest(StrictManifestModel):
     declaration: str
 
 
-class TritonSignatureManifest(StrictManifestModel):
+class PythonSignatureManifest(StrictManifestModel):
     symbol: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
     declaration: str
+
+
+# Kept as an alias for callers that imported the original schema name.
+TritonSignatureManifest = PythonSignatureManifest
 
 
 class ToleranceManifest(StrictManifestModel):
@@ -103,6 +108,12 @@ class TritonRuntimeManifest(StrictManifestModel):
     syntax_check: Literal["py_compile"] = "py_compile"
 
 
+class TorchRuntimeManifest(StrictManifestModel):
+    profile: Literal["torch_cuda_v1"] = "torch_cuda_v1"
+    executable: Literal["python3"] = "python3"
+    syntax_check: Literal["py_compile"] = "py_compile"
+
+
 class CudaImplementationManifest(StrictManifestModel):
     language: Literal[KernelLanguage.CUDA_CPP]
     starter: str
@@ -123,8 +134,18 @@ class TritonImplementationManifest(StrictManifestModel):
     runtime: TritonRuntimeManifest = Field(default_factory=TritonRuntimeManifest)
 
 
+class TorchImplementationManifest(StrictManifestModel):
+    language: Literal[KernelLanguage.TORCH_PYTHON]
+    starter: str
+    statement_appendix: str | None = None
+    source_suffix: Literal[".py"] = ".py"
+    signature: PythonSignatureManifest
+    harness: HarnessManifest
+    runtime: TorchRuntimeManifest = Field(default_factory=TorchRuntimeManifest)
+
+
 ImplementationManifest = Annotated[
-    CudaImplementationManifest | TritonImplementationManifest,
+    CudaImplementationManifest | TritonImplementationManifest | TorchImplementationManifest,
     Field(discriminator="language"),
 ]
 
@@ -208,16 +229,20 @@ class ProblemImplementation:
     def __init__(
         self,
         problem: Problem,
-        manifest: CudaImplementationManifest | TritonImplementationManifest,
+        manifest: (
+            CudaImplementationManifest | TritonImplementationManifest | TorchImplementationManifest
+        ),
     ):
         self.problem = problem
         self.manifest = manifest
         self.language = KernelLanguage(manifest.language)
         self.source_suffix = manifest.source_suffix
         self.editor_language = "cpp" if self.language is KernelLanguage.CUDA_CPP else "python"
-        self.display_name = (
-            "CUDA C++" if self.language is KernelLanguage.CUDA_CPP else "Triton Python"
-        )
+        self.display_name = {
+            KernelLanguage.CUDA_CPP: "CUDA C++",
+            KernelLanguage.TRITON_PYTHON: "Triton Python",
+            KernelLanguage.TORCH_PYTHON: "PyTorch Python",
+        }[self.language]
         self.signature = manifest.signature
         self.starter_path = problem._resolve_file(manifest.starter)
         self.starter_code = self.starter_path.read_text(encoding="utf-8")
@@ -276,7 +301,7 @@ class Problem:
             for language, implementation in manifest.implementations.items()
         }
         self.supported_languages = tuple(
-            sorted(self.implementations, key=lambda language: language.value)
+            language for language in KernelLanguage if language in self.implementations
         )
 
         # Backwards-compatible attributes map to the default (CUDA for built-ins) implementation.
@@ -320,6 +345,7 @@ class Problem:
             "difficulty": manifest.difficulty,
             "revision": manifest.revision,
             "summary": self.statement_markdown.split("\n", 1)[0].lstrip("# ").strip(),
+            "languages": [language.value for language in self.supported_languages],
         }
 
     def public_detail(self) -> dict[str, Any]:

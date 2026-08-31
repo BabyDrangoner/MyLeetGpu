@@ -62,6 +62,48 @@ def test_comparable_versions_report_per_size_speedup_against_baseline(
         assert row["metrics"][candidate.id]["sample_count"] == 3
 
 
+def test_torch_versions_compare_with_runtime_profile_as_execution_identity(
+    repository: Repository,
+) -> None:
+    runtime_profile = (
+        "backend=torch_python",
+        "policy=restricted_torch_v1",
+        "python=3.11.10",
+        "torch=2.5.1",
+        "torch_cuda=12.4",
+        "arch=sm_89",
+    )
+    baseline = create_saved_version(
+        repository,
+        problem_id="multi-head-attention",
+        language="torch_python",
+        compile_flags=runtime_profile,
+        source_digest="3" * 64,
+        medians=(2.0, 4.0),
+    )
+    candidate = create_saved_version(
+        repository,
+        problem_id="multi-head-attention",
+        language="torch_python",
+        compile_flags=runtime_profile,
+        source_digest="4" * 64,
+        medians=(1.0, 2.0),
+    )
+
+    result = compare_versions(
+        repository,
+        problem_id="multi-head-attention",
+        version_ids=[baseline.id, candidate.id],
+        baseline_id=baseline.id,
+        language="torch_python",
+    )
+
+    assert result["comparable"] is True
+    assert result["versions"][0]["language"] == "torch_python"
+    assert result["versions"][0]["compile_flags"] == list(runtime_profile)
+    assert all(row["metrics"][candidate.id]["speedup"] == 2.0 for row in result["rows"])
+
+
 @pytest.mark.parametrize(
     ("overrides", "expected_reason"),
     [

@@ -113,6 +113,43 @@ def test_triton_submission_uses_an_isolated_python_snapshot(service_bundle) -> N
     assert repository.get_job(job.id).language == "triton_python"  # type: ignore[union-attr]
 
 
+def test_torch_only_problem_uses_manifest_default_and_python_snapshot(service_bundle) -> None:
+    _, repository, service = service_bundle
+    source = (
+        "import torch\n\n"
+        "def solve(query, key, value, attention_mask):\n"
+        "    return torch.matmul(query, value.transpose(-2, -1))\n"
+    )
+
+    job = service.submit(
+        problem_id="multi-head-attention",
+        action=JobAction.VALIDATE,
+        source=source,
+    )
+
+    spool = Path(job.spool_path)  # type: ignore[arg-type]
+    assert job.language == "torch_python"
+    assert (spool / "source.py").read_text(encoding="utf-8") == source
+    assert not (spool / "source.cu").exists()
+    assert repository.get_job(job.id).language == "torch_python"  # type: ignore[union-attr]
+
+    with pytest.raises(JobSubmissionError, match="does not support|不支持"):
+        service.submit(
+            problem_id="multi-head-attention",
+            language="cuda_cpp",
+            action=JobAction.COMPILE,
+            source=SOURCE,
+        )
+
+    with pytest.raises(JobSubmissionError, match="does not support|不支持"):
+        service.submit(
+            problem_id="multi-head-attention",
+            language="",
+            action=JobAction.COMPILE,
+            source=SOURCE,
+        )
+
+
 def test_language_is_part_of_duplicate_and_rebenchmark_identity(service_bundle) -> None:
     _, repository, service = service_bundle
     existing = create_saved_version(

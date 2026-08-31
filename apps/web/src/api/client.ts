@@ -14,6 +14,7 @@ import type {
   ProblemSummary,
   SavedVersion,
 } from '../domain/types'
+import { implementationLanguages, isKernelLanguage, languageMetadata } from '../lib/languages'
 
 const API_ROOT = '/api'
 
@@ -95,12 +96,6 @@ function asDate(value: unknown): string {
   return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(text) ? `${text}Z` : text
 }
 
-const KERNEL_LANGUAGES = ['cuda_cpp', 'triton_python'] as const
-
-function isKernelLanguage(value: unknown): value is KernelLanguage {
-  return KERNEL_LANGUAGES.includes(value as KernelLanguage)
-}
-
 function asKernelLanguage(value: unknown, fallback: KernelLanguage = 'cuda_cpp'): KernelLanguage {
   return isKernelLanguage(value) ? value : fallback
 }
@@ -113,12 +108,14 @@ function normalizeSignature(value: unknown): string | undefined {
 
 function normalizeImplementation(value: unknown, language: KernelLanguage): ProblemImplementation {
   const raw = asRecord(value)
-  const triton = language === 'triton_python'
+  const metadata = languageMetadata[language]
+  const fileExtension = asString(raw.file_extension ?? raw.source_suffix, metadata.fileExtension)
+  const editorLanguage = asString(raw.editor_language, metadata.editorLanguage)
   return {
     language,
-    display_name: asString(raw.display_name, triton ? 'Triton (Python)' : 'CUDA C++'),
-    file_extension: asString(raw.file_extension ?? raw.source_suffix, triton ? '.py' : '.cu') === '.py' ? '.py' : '.cu',
-    editor_language: asString(raw.editor_language, triton ? 'python' : 'cpp') === 'python' ? 'python' : 'cpp',
+    display_name: asString(raw.display_name, metadata.label),
+    file_extension: fileExtension === '.py' || fileExtension === '.cu' ? fileExtension : metadata.fileExtension,
+    editor_language: editorLanguage === 'python' || editorLanguage === 'cpp' ? editorLanguage : metadata.editorLanguage,
     starter_code: asString(raw.starter_code),
     signature: normalizeSignature(raw.signature),
     instructions_markdown: asString(raw.instructions_markdown ?? raw.statement_appendix ?? raw.instructions) || undefined,
@@ -156,7 +153,7 @@ function normalizeProblemDetail(value: unknown): ProblemDetail {
   const raw = asRecord(value)
   const implementationRaw = asRecord(raw.implementations)
   const implementations: Partial<Record<KernelLanguage, ProblemImplementation>> = {}
-  for (const language of KERNEL_LANGUAGES) {
+  for (const language of implementationLanguages) {
     if (implementationRaw[language] !== undefined) {
       implementations[language] = normalizeImplementation(implementationRaw[language], language)
     }
@@ -173,7 +170,7 @@ function normalizeProblemDetail(value: unknown): ProblemDetail {
   const requestedDefault = asKernelLanguage(raw.default_language ?? raw.language)
   const defaultLanguage = implementations[requestedDefault]
     ? requestedDefault
-    : KERNEL_LANGUAGES.find((language) => implementations[language]) ?? 'cuda_cpp'
+    : implementationLanguages.find((language) => implementations[language]) ?? 'cuda_cpp'
   const defaultImplementation = implementations[defaultLanguage] ?? normalizeImplementation({}, defaultLanguage)
   const constraints = Array.isArray(raw.constraints)
     ? raw.constraints.map((item) => asString(item))
@@ -190,7 +187,7 @@ function normalizeProblemDetail(value: unknown): ProblemDetail {
   })
   return {
     ...normalizeProblemSummary(raw),
-    languages: KERNEL_LANGUAGES.filter((language) => implementations[language]),
+    languages: implementationLanguages.filter((language) => implementations[language]),
     statement_markdown: asString(raw.statement_markdown),
     default_language: defaultLanguage,
     implementations,
@@ -202,7 +199,7 @@ function normalizeProblemDetail(value: unknown): ProblemDetail {
   }
 }
 
-function normalizeEnvironment(value: unknown): EnvironmentSnapshot {
+function normalizeEnvironment(value: unknown, fallbackLanguage: KernelLanguage = 'cuda_cpp'): EnvironmentSnapshot {
   const raw = asRecord(value)
   const telemetry = asRecord(raw.telemetry)
   const toolchain = asRecord(raw.toolchain)
@@ -213,7 +210,7 @@ function normalizeEnvironment(value: unknown): EnvironmentSnapshot {
   return {
     ...raw,
     healthy,
-    backend: asKernelLanguage(raw.backend),
+    backend: asKernelLanguage(raw.backend, fallbackLanguage),
     status: asString(raw.status, healthy ? 'healthy' : 'unhealthy'),
     gpu_name: asString(raw.gpu_name ?? raw.gpu) || undefined,
     compute_capability: asString(raw.compute_capability) || undefined,
@@ -222,6 +219,7 @@ function normalizeEnvironment(value: unknown): EnvironmentSnapshot {
     nvcc_version: asString(raw.nvcc_version) || undefined,
     python_version: asString(raw.python_version ?? toolchain.python_version) || undefined,
     torch_version: asString(raw.torch_version ?? toolchain.torch_version) || undefined,
+    torch_cuda_version: asString(raw.torch_cuda_version ?? toolchain.torch_cuda_version) || undefined,
     triton_version: asString(raw.triton_version ?? toolchain.triton_version) || undefined,
     container_image: asString(raw.container_image ?? raw.cuda_image) || undefined,
     container_digest: asString(raw.container_digest ?? raw.image_digest) || undefined,
@@ -252,10 +250,10 @@ function normalizeMetric(value: unknown, fallbackSize: string | number = ''): Be
   }
 }
 
-function normalizeBenchmarkRun(value: unknown): BenchmarkRun {
+function normalizeBenchmarkRun(value: unknown, language: KernelLanguage = 'cuda_cpp'): BenchmarkRun {
   const raw = asRecord(value)
   const metricsRaw = [raw.metrics, raw.results, raw.measurements, raw.measurements_json].find(Array.isArray) as unknown[] | undefined
-  const environment = normalizeEnvironment(raw.environment)
+  const environment = normalizeEnvironment(raw.environment, language)
   return {
     ...raw,
     id: asString(raw.id) || undefined,
@@ -278,8 +276,9 @@ function normalizeBenchmarkRun(value: unknown): BenchmarkRun {
 
 function normalizeVersion(value: unknown): SavedVersion {
   const raw = asRecord(value)
+  const language = asKernelLanguage(raw.language)
   const runs = Array.isArray(raw.benchmark_runs)
-    ? raw.benchmark_runs.map(normalizeBenchmarkRun).sort((left, right) => {
+    ? raw.benchmark_runs.map((run) => normalizeBenchmarkRun(run, language)).sort((left, right) => {
         const timeOrder = (Date.parse(left.created_at ?? '') || 0) - (Date.parse(right.created_at ?? '') || 0)
         return timeOrder || String(left.id ?? '').localeCompare(String(right.id ?? ''), undefined, { numeric: true })
       })
@@ -288,7 +287,7 @@ function normalizeVersion(value: unknown): SavedVersion {
     id: asString(raw.id),
     problem_id: asString(raw.problem_id),
     problem_revision: asString(raw.problem_revision),
-    language: asKernelLanguage(raw.language),
+    language,
     name: asString(raw.name, '未命名版本'),
     notes: asString(raw.notes) || undefined,
     source_hash: asString(raw.source_hash),
@@ -332,7 +331,7 @@ function normalizeJob(value: unknown): Job {
   }
 }
 
-function normalizeComparison(value: unknown, versionIds: string[], baselineId: string): ComparisonResult {
+function normalizeComparison(value: unknown, versionIds: string[], baselineId: string, fallbackLanguage: KernelLanguage): ComparisonResult {
   const raw = asRecord(value)
   const rows: ComparisonRow[] = (Array.isArray(raw.rows) ? raw.rows : []).map((item) => {
     const row = asRecord(item)
@@ -355,9 +354,9 @@ function normalizeComparison(value: unknown, versionIds: string[], baselineId: s
     environment_consistent: Boolean(raw.environment_consistent),
     rows,
     baseline_id: asString(raw.baseline_id, baselineId),
-    language: raw.language === undefined ? undefined : asKernelLanguage(raw.language),
+    language: asKernelLanguage(raw.language, fallbackLanguage),
     version_ids: Array.isArray(raw.version_ids) ? raw.version_ids.map((id) => asString(id)) : versionIds,
-    environment: raw.environment ? normalizeEnvironment(raw.environment) : undefined,
+    environment: raw.environment ? normalizeEnvironment(raw.environment, fallbackLanguage) : undefined,
   }
 }
 
@@ -433,7 +432,7 @@ export const api = {
           baseline_id: baselineId,
         }),
       })
-      return normalizeComparison(result, versionIds, baselineId)
+      return normalizeComparison(result, versionIds, baselineId, language)
     },
     async findDuplicates(problemId: string, language: KernelLanguage, sourceHash: string): Promise<SavedVersion[]> {
       const query = new URLSearchParams({ problem_id: problemId, language, source_hash: sourceHash })
@@ -449,6 +448,6 @@ export const api = {
 
   async environment(language: KernelLanguage = 'cuda_cpp'): Promise<EnvironmentSnapshot> {
     const query = new URLSearchParams({ language })
-    return normalizeEnvironment(await request(`/environment?${query}`))
+    return normalizeEnvironment(await request(`/environment?${query}`), language)
   },
 }

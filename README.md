@@ -1,6 +1,6 @@
 # MyLeetGpu
 
-MyLeetGpu 是一个面向单机可信操作者的 CUDA C++ / Triton (Python) Kernel 编程、正确性验证与 GPU 性能比较环境。当前内置三道原创题及两套 starter，提供 Monaco 编辑器、异步隔离 Judge、手动性能版本、持久化 benchmark 和同语言统一口径比较。
+MyLeetGpu 是一个面向单机可信操作者的 GPU 编程、正确性验证与性能比较环境。它把 CUDA C++、Triton (Python) Kernel 和高层 PyTorch (Python) 作为三种一等实现类型；当前内置三道算子题，以及多头注意力（MHA）和分组查询注意力（GQA）两道 PyTorch 题。平台提供 Monaco 编辑器、异步隔离 Judge、手动性能版本、持久化 benchmark 和同语言统一口径比较。
 
 > 安全边界：默认只发布到 `127.0.0.1`。可选的 `make start-lan` 仅供受信任的家庭/实验室局域网使用，要求 Basic Auth，并将防火墙范围限制为本地子网。它不是多用户权限系统；消费级 GPU 与 Docker 不提供公网多租户所需的强 GPU/显存隔离。严禁公网、路由器端口转发或公共 Wi-Fi 暴露。
 
@@ -26,13 +26,15 @@ make clean-jobs    # 清理不再被活动任务引用的临时目录
 
 首次执行 `make doctor` 可能会拉取固定版本的 CUDA 和 PyTorch/Triton 镜像，耗时取决于网络。持久数据保存在 `./data/myleetgpu.db`；源码快照只会在用户显式“保存为性能版本”且完整验证、benchmark 均成功后进入数据库。
 
-### CUDA C++ 与 Triton
+### CUDA C++、Triton 与 PyTorch
 
-Vector Addition、Matrix Transpose 和 Reduction 都支持在编辑器顶部切换 `CUDA C++` 与 `Triton (Python)`。URL、服务端草稿、本地回退草稿和性能版本都带实现语言；切换语言不会覆盖另一套源码。
+Vector Addition、Matrix Transpose 和 Reduction 支持在编辑器顶部切换 `CUDA C++` 与 `Triton (Python)`；MHA 和 GQA 使用 `PyTorch (Python)`，练习由基础 Tensor 运算组合 attention，而不是编写自定义 Kernel。URL、服务端草稿、本地回退草稿和性能版本都带实现语言；切换语言不会覆盖另一套源码。
 
 Triton 的“编译”动作在无 GPU 容器中完成 Python 语法检查和 `restricted_triton_v1` 提交策略预检；只允许题面说明中的 `@triton.jit` 子集与直线式 `solve` launcher，文件/网络/进程、反射、动态执行和打印会被拒绝。`@triton.jit` Kernel 会在运行或验证的第一次 GPU 调用中按实际参数完成 JIT 专化，因此预检通过后仍可能出现 Triton 编译错误。Triton 运行环境固定为官方 `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel` 镜像的审计 digest，当前包含 Python 3.11、PyTorch 2.5.1 + CUDA 12.4 和 Triton 3.1；实际版本和镜像摘要以环境页及 `make doctor` 的探测结果为准。
 
-性能版本按语言分组，只允许同一语言的版本比较和统一重测；系统不会生成 CUDA C++ 与 Triton 之间的 speedup。语言资料可参考 [Triton 官方安装说明](https://triton-lang.org/main/getting-started/installation.html)、[Vector Addition 教程](https://triton-lang.org/main/getting-started/tutorials/01-vector-add.html) 和 [PyTorch 官方版本页](https://docs.pytorch.org/get-started/previous-versions/)。
+PyTorch 的“编译”动作同样是无 GPU 语法与 `restricted_torch_v1` AST 策略预检。提交只定义题目签名指定的 `solve(...) -> torch.Tensor`，可以使用白名单中的 reshape/transpose、matmul、mask、softmax 和 repeat-interleave 等基础运算；不能直接调用现成的 scaled-dot-product attention，也不能使用文件、网络、进程、反射、动态执行、打印或原地输出逃逸。运行、完整验证和 benchmark 由可信 harness 在 GPU 0 的受控 CUDA stream 上完成。
+
+Triton 与 PyTorch 共用固定的官方 PyTorch/Triton 镜像，但分别探测并保存环境快照。性能版本按语言分组，只允许同一语言的版本比较和统一重测；系统不会生成 CUDA C++、Triton 与 PyTorch 之间的跨语言 speedup。语言资料可参考 [Triton 官方安装说明](https://triton-lang.org/main/getting-started/installation.html)、[Vector Addition 教程](https://triton-lang.org/main/getting-started/tutorials/01-vector-add.html) 和 [PyTorch 官方版本页](https://docs.pytorch.org/get-started/previous-versions/)。
 
 ### 可选：同一局域网访问
 

@@ -37,7 +37,7 @@ class JobService:
         self,
         *,
         problem_id: str,
-        language: str = "cuda_cpp",
+        language: str | None = None,
         action: JobAction,
         source: str | None = None,
         version_name: str | None = None,
@@ -49,10 +49,11 @@ class JobService:
             problem = self.catalog.get(problem_id)
         except KeyError as error:
             raise JobSubmissionError(str(error)) from error
+        selected_language = problem.default_language.value if language is None else language
         try:
-            implementation = problem.get_implementation(language)
+            implementation = problem.get_implementation(selected_language)
         except KeyError as error:
-            raise JobSubmissionError(f"题目不支持实现语言: {language}") from error
+            raise JobSubmissionError(f"题目不支持实现语言: {selected_language}") from error
 
         if action is JobAction.REBENCHMARK:
             selected = version_ids or []
@@ -63,7 +64,7 @@ class JobService:
                 version.problem_id != problem_id for version in versions
             ):
                 raise JobSubmissionError("every selected version must belong to the problem")
-            if any(version.language != language for version in versions):
+            if any(version.language != selected_language for version in versions):
                 raise JobSubmissionError("rebenchmark versions must use one requested language")
         else:
             self._validate_source(source)
@@ -80,7 +81,7 @@ class JobService:
             if notes is not None and len(notes) > 4000:
                 raise JobSubmissionError("notes is longer than 4000 characters")
             duplicates = self.repository.find_duplicate_versions(
-                problem_id, submitted_hash or "", language
+                problem_id, submitted_hash or "", selected_language
             )
             if duplicates and not allow_duplicate:
                 raise DuplicateSourceError(
@@ -109,7 +110,7 @@ class JobService:
                 id=job_id,
                 problem_id=problem_id,
                 problem_revision=problem.manifest.revision,
-                language=language,
+                language=selected_language,
                 action=action.value,
                 status=JobStatus.QUEUED.value,
                 phase="queued",

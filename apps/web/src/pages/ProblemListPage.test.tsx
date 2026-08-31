@@ -22,6 +22,7 @@ describe('ProblemListPage', () => {
     const user = userEvent.setup()
     render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><ProblemListPage /></MemoryRouter>)
     expect(await screen.findByText('向量加法')).toBeInTheDocument()
+    expect(screen.getByText('实现语言').parentElement).toHaveTextContent('3实现语言')
     await user.type(screen.getByLabelText('搜索题目'), '归约')
     expect(screen.queryByText('向量加法')).not.toBeInTheDocument()
     expect(screen.getByText('并行归约')).toBeInTheDocument()

@@ -2,9 +2,9 @@
 
 ## 1. 文档目的与适用范围
 
-本文描述 MyLeetGpu 当前版本的产品语义、模块边界、数据模型、任务协议、CUDA C++ / Triton 执行隔离和运维策略。实现、测试和 UI 应共同遵守本文中的不变量；若接口细节发生变化，应同时更新 OpenAPI、本文和用户指南。
+本文描述 MyLeetGpu 当前版本的产品语义、模块边界、数据模型、任务协议、CUDA C++ / Triton / PyTorch 执行隔离和运维策略。实现、测试和 UI 应共同遵守本文中的不变量；若接口细节发生变化，应同时更新 OpenAPI、本文和用户指南。
 
-MyLeetGpu 是一个在 Windows + WSL2 + NVIDIA GPU 上运行的本地 Kernel 练习环境，当前把 `cuda_cpp` 和 `triton_python` 作为两种一等实现语言。它面向单机、单用户、可信操作者，但仍把待执行的 CUDA C++ / Python 源码视为不可信输入。
+MyLeetGpu 是一个在 Windows + WSL2 + NVIDIA GPU 上运行的本地 GPU 编程练习环境，当前把 `cuda_cpp`、`triton_python` 和 `torch_python` 作为三种一等实现语言。前两种面向自定义 Kernel，第三种面向由基础 PyTorch Tensor 运算组合出的模型算法。它面向单机、单用户、可信操作者，但仍把待执行的 CUDA C++ / Python 源码视为不可信输入。
 
 > 安全边界：默认宿主机唯一发布的端口是 `127.0.0.1:3000`。显式启用 LAN overlay 时，Nginx 还会在检测出的具体局域网 IPv4 上发布经过 Basic Auth 保护的 3000，并用 Windows + WSL Hyper-V 防火墙限制到 `LocalSubnet`。API 8000 始终不向宿主发布。LAN 模式只方便同一受信任网络中的单一操作者，不提供多租户隔离或传输加密；严禁公网、端口转发和不可信远程提交。
 
@@ -12,11 +12,11 @@ MyLeetGpu 是一个在 Windows + WSL2 + NVIDIA GPU 上运行的本地 Kernel 练
 
 ### 2.1 目标
 
-- 提供简体中文的桌面端 Web 界面，浏览三道原创 GPU 题目：Vector Addition、Matrix Transpose 和 Reduction；每题同时提供 CUDA C++ 与 Triton (Python) starter。
+- 提供简体中文的桌面端 Web 界面，浏览五道原创 GPU 题目：三道 CUDA C++ / Triton 算子题，以及使用 PyTorch (Python) 的多头注意力（MHA）和分组查询注意力（GQA）。
 - 使用 Monaco Editor 编辑语言对应的 `solve` 接口，支持语言切换、starter code、重置以及按语言隔离的浏览器/服务端草稿自动保存。
 - 严格区分“编译”“运行公开样例”“完整验证”和“保存为性能版本”。
-- 显示经过清理和限长的 NVCC、Triton 提交策略/JIT、运行错误、错误答案、超时及 stdout/stderr 诊断。
-- 正确性通过后，由平台 harness 使用固定协议测量 GPU kernel 性能。
+- 显示经过清理和限长的 NVCC、Triton/PyTorch 提交策略、JIT、运行错误、错误答案、超时及 stdout/stderr 诊断。
+- 正确性通过后，由平台 harness 使用固定协议测量 GPU Kernel 或 PyTorch attention 的性能。
 - 仅在用户显式保存且验证、benchmark 均成功后，原子地持久化不可变代码版本和 benchmark。
 - 比较同一题目、同一实现语言的多个版本，展示环境一致性、逐规模性能和相对 baseline 的 speedup；禁止跨语言 speedup。
 - 服务重启后保留草稿、手动保存版本、benchmark 和环境快照。
@@ -70,11 +70,11 @@ flowchart LR
 
 - 基础 Compose 的主机端口映射必须显式写成 `127.0.0.1:3000:...`。LAN overlay 必须绑定自动检测或显式给定的单一非回环 IPv4，拒绝 `0.0.0.0`，同时挂载认证配置；不能依赖 Docker 默认绑定。
 - `make start` 先运行一次性 `migrate` 服务执行 `alembic upgrade head`；只有它成功退出，API 与 Worker 才启动。迁移失败不得用空库覆盖旧数据。
-- `/api/health` 仅表示 API 进程存活；`/api/ready` 检查数据库、非空题目注册表、最近一次健康的 CUDA Runner 环境快照、`gpu:0` Worker 活跃租约及共享 GPU 熔断文件。任一条件失败均返回 503。Triton 工具链独立探测，缺失时只阻止 `triton_python` Job，不应把仍可用的 CUDA C++ 路径伪装为不可用。
+- `/api/health` 仅表示 API 进程存活；`/api/ready` 检查数据库、非空题目注册表、最近一次健康的 CUDA Runner 环境快照、`gpu:0` Worker 活跃租约及共享 GPU 熔断文件。任一条件失败均返回 503。Triton 与纯 PyTorch 工具链分别按需探测；某一 Python backend 缺失时只阻止对应 Job，不应把其他可用路径伪装为不可用。
 - 编译容器和 GPU 执行容器彼此独立，均为一次性容器。
 - 单张 GPU 任一时刻最多执行一个运行、验证或 benchmark Job，其余 Job 留在 SQLite 队列中。
 - 普通 Job 的源码只存在于权限受限的临时 spool；完成、取消、超时或崩溃恢复后均须清除。
-- CUDA C++ 固定使用 `nvidia/cuda:12.4.1-devel-ubuntu22.04`。Triton 固定使用官方 `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel@sha256:14611869895df612b7b07227d5925f30ec3cd6673bad58ce3d84ed107950e014`，镜像内实际工具链为 Python 3.11、PyTorch 2.5.1 + CUDA 12.4、Triton 3.1。Runner 拒绝 `latest` 和 Docker 隐式拉取，读取实际 RepoDigest，并把语言、GPU、工具链和镜像信息分别写入环境快照。
+- CUDA C++ 固定使用 `nvidia/cuda:12.4.1-devel-ubuntu22.04`。Triton 与 PyTorch 固定共用官方 `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel@sha256:14611869895df612b7b07227d5925f30ec3cd6673bad58ce3d84ed107950e014`，镜像内实际工具链为 Python 3.11、PyTorch 2.5.1 + CUDA 12.4、Triton 3.1。Runner 拒绝 `latest` 和 Docker 隐式拉取，读取实际 RepoDigest，并按 backend 把 GPU、工具链和镜像信息写入独立环境快照。
 
 ### 3.3 前端状态与可访问性
 
@@ -88,7 +88,7 @@ flowchart LR
 | `backend/myleetgpu/domain` | Job 状态、benchmark 统计/可比性，以及题目 manifest 与目录注册表 | 标准库、Pydantic、YAML 和受约束的题目文件读取 | FastAPI、SQLAlchemy、Docker 子进程 |
 | `backend/myleetgpu/application` | Job 提交与 spool 生命周期、重复版本校验、版本比较等 HTTP/Worker 共用用例 | 领域层与仓储 | 拼接 shell 命令；执行用户二进制；绕过版本保存不变量 |
 | `backend/myleetgpu/infrastructure` | SQLAlchemy 2 仓储、SQLite 队列、Alembic、时钟和文件 spool 实现 | 应用端口、领域层 | 把 ORM 实体泄漏到 UI；永久保留普通 Job 源码 |
-| `backend/myleetgpu/runner` | CUDA/Triton Docker Runner adapter、语言工具链探测、资源限制、输出清理、超时和容器清理 | Runner 端口和受控配置 | 接收任意命令、编译参数、路径或 shell 字符串 |
+| `backend/myleetgpu/runner` | CUDA/Triton/PyTorch Docker Runner adapter、语言工具链探测、提交策略、资源限制、输出清理、超时和容器清理 | Runner 端口和受控配置 | 接收任意命令、编译参数、路径或 shell 字符串 |
 | `backend/myleetgpu/api` | FastAPI 路由、Pydantic 校验、错误映射、OpenAPI | 应用层 | 在请求线程直接运行 NVCC/Docker |
 | Worker | 原子领取 Job、维护租约，并编排编译、运行、验证、保存、重测、清理和熔断 | Domain、Application、Repository 与 Runner adapter | 并发使用同一 GPU；在日志中泄漏内部测试 |
 | `alembic` / `migrate` | 管理 schema revision；Compose 启动前一次性执行 `upgrade head` | SQLAlchemy metadata、SQLite | 迁移失败后用空库覆盖持久数据 |
@@ -109,33 +109,39 @@ problems/<slug>/
 ├── starter.cu
 ├── instructions/
 │   ├── cuda_cpp.md
-│   └── triton_python.md
+│   ├── triton_python.md
+│   └── torch_python.md
 ├── include/
 │   └── solve.h
 ├── harness/
 │   ├── validator.cu
 │   └── benchmark.cu
-└── triton/
+├── triton/
+│   ├── starter.py
+│   └── harness/
+│       ├── validator.py
+│       └── benchmark.py
+└── torch/
     ├── starter.py
     └── harness/
         ├── validator.py
         └── benchmark.py
 ```
 
-CUDA C++ 用户只能实现 `solve.h` 约定的接口；Triton 用户文件必须提供 manifest 声明的 Python `solve(...)`，可在同一文件定义 `@triton.jit` Kernel，但只能使用 `restricted_triton_v1` 白名单允许的模块结构、launcher 和 Triton DSL。入口、数据生成、拷贝、受控 stream、同步、参考实现、结果验证和计时均由语言对应的可信平台 harness 控制。当前三道内置题都包含两套 starter 和 harness。
+CUDA C++ 用户只能实现 `solve.h` 约定的接口；Triton 用户文件必须提供 manifest 声明的 Python `solve(...)`，可在同一文件定义 `@triton.jit` Kernel，但只能使用 `restricted_triton_v1` 白名单允许的模块结构、launcher 和 Triton DSL。PyTorch 用户文件定义一个 `solve(...) -> torch.Tensor`，只能使用 `restricted_torch_v1` 白名单中的基础 Tensor 变换、矩阵运算、mask 和 softmax；现成 SDPA、I/O、反射、动态执行、进程与原地输出逃逸均被拒绝。入口、数据生成、拷贝、受控 stream、同步、参考实现、结果验证和计时均由语言对应的可信平台 harness 控制。题目包只需包含自己声明的实现目录；算子题与 attention 题不必支持相同语言。
 
 ### 5.2 Manifest 最低字段
 
 `problem.yaml` 至少声明：
 
 - `slug`、标题、难度和递增的题目 `revision`；
-- `default_language` 与按 `cuda_cpp` / `triton_python` 键控的 `implementations`；每个实现独立声明函数签名、starter、语言补充说明、harness 和固定工具链 profile；
+- `default_language` 与按 `cuda_cpp` / `triton_python` / `torch_python` 键控的 `implementations`；每个实现独立声明函数签名、starter、语言补充说明、harness 和固定工具链 profile；
 - 公共的输入输出类型与约束；
 - 整数精确比较或浮点 `atol`/`rtol`，以及 NaN/Inf 处理策略；
 - 公开、边界和内部测试配置；
 - benchmark 输入规模、固定随机种子、warmup、samples/iterations、极短 kernel 的 inner repetitions；
 - 编译、运行、验证和 benchmark timeout；
-- CUDA 实现只能从平台 allowlist 中选择编译配置，不能包含任意用户 flags；Triton 实现只能选择固定的 `triton_torch_cuda_v1`、`python3` 和版本化的受限提交策略。
+- CUDA 实现只能从平台 allowlist 中选择编译配置，不能包含任意用户 flags；Triton 与 PyTorch 实现分别只能选择固定的 `triton_torch_cuda_v1` / `torch_cuda_v1`、`python3` 和对应的版本化受限提交策略。
 
 API 和 Worker 各自在进程启动时加载并以 schema 校验所有 manifest，同时验证引用文件位于题目目录内、slug 唯一、revision 合法、测试和 benchmark 配置完整。任一题目无效时对应进程启动失败，Compose 的健康/就绪检查不能成功，维护者从启动日志获得错误；不能静默忽略。
 
@@ -150,7 +156,7 @@ API 和 Worker 各自在进程启动时加载并以 schema 校验所有 manifest
 - `id`、`problem_id`、`language`；单用户模式下每个 `(problem_id, language)` 至多一个活动草稿；
 - 当前源码和更新时间。
 
-草稿可变，不是性能版本。当前服务端按题目和语言 upsert/后写覆盖；浏览器本地回退 key 也包含语言。CUDA 与 Triton 草稿互不覆盖。自动保存、重置、编译、运行和验证均不得创建 `Version`。
+草稿可变，不是性能版本。当前服务端按题目和语言 upsert/后写覆盖；浏览器本地回退 key 也包含语言。CUDA、Triton 与 PyTorch 草稿互不覆盖。自动保存、重置、编译、运行和验证均不得创建 `Version`。
 
 ### 6.2 `Version`
 
@@ -158,7 +164,7 @@ API 和 Worker 各自在进程启动时加载并以 schema 校验所有 manifest
 - 用户可修改的名称和备注；
 - 不可变的完整源码快照和 `source_hash`；
 - 创建时间和正确性通过状态；
-- 保存时的编译配置、suite/protocol 标识；
+- 保存时的规范化执行配置、suite/protocol 标识；
 - 与初次 `BenchmarkRun` 的关系。
 
 版本的语言、源码、题目 revision 和初次测量语义不可修改。重命名或改备注只更新元数据。删除版本必须在 UI 二次确认，API 还要求 `confirmed=true`，并在事务中级联删除关联 benchmark。重复源码检查限定在同题、同语言；前端先提示，服务端也在入队、Worker 开始和最终提交前复查，只有显式 `allow_duplicate=true` 才允许继续。
@@ -177,21 +183,21 @@ Job 元数据目前保留在 SQLite 中；源码和编译产物不随 Job 永久
 
 - `id`、`version_id`、`environment_snapshot_id`、创建时间；题目 revision 由关联 Version 给出；
 - suite hash、benchmark protocol version；
-- 编译配置、输入规模、固定种子、warmup、samples/iterations、inner repetitions；
+- 执行配置、输入规模、固定种子、warmup、samples/iterations、inner repetitions；
 - 每个规模的限量原始样本，以及 median、p95、min、CV 和 MAD。
 
 一个 `Version` 可以因“在当前统一环境重测”关联多个 `BenchmarkRun`；历史运行不可原地改写。当前比较 API 自动选用按创建时间和 ID 排序后的最新运行，不提供手工选择历史 BenchmarkRun 的参数。
 
 ### 6.5 `EnvironmentSnapshot`
 
-- `backend`（`cuda_cpp` 或 `triton_python`）、GPU 型号和 Compute Capability；
-- Windows/WSL 可见的驱动版本，以及语言对应的工具链：CUDA Runtime/NVCC，或 Python/PyTorch/Triton/Torch CUDA；
+- `backend`（`cuda_cpp`、`triton_python` 或 `torch_python`）、GPU 型号和 Compute Capability；
+- Windows/WSL 可见的驱动版本，以及语言对应的工具链：CUDA Runtime/NVCC、Python/PyTorch/Triton/Torch CUDA，或 Python/PyTorch/Torch CUDA；
 - 固定的语言 Runner 镜像引用及实际 image digest；
 - 集中探测所得的 CUDA 架构；
 - 可用时的温度、SM 时钟、功耗和 GPU busy；不可获得时存为 `null`，API/UI 显示 `unavailable`。
 - `created_at` 保持快照创建时间；`observed_at` 记录该环境最近一次受信探测时间。同 fingerprint 的未引用状态行可刷新 `observed_at`，Version/BenchmarkRun 引用的测量快照不原地改写。
 
-实现语言、稳定的工具链和硬件字段经规范化后计算 `environment_fingerprint`。Triton 指纹包含 Python、PyTorch、Triton、Torch CUDA、镜像 digest 与目标架构；CUDA 指纹包含 CUDA Runtime、NVCC、镜像 digest 与目标架构。温度、瞬时时钟、功耗和 GPU busy 等易变遥测只随快照记录，不参与 fingerprint，否则同一机器的连续运行会被错误判为不同环境。不能用空字符串或伪造值补齐 WSL 无法提供的遥测。
+实现语言、稳定的工具链和硬件字段经规范化后计算 `environment_fingerprint`。Triton 指纹包含 Python、PyTorch、Triton、Torch CUDA、镜像 digest 与目标架构；PyTorch 指纹包含 Python、PyTorch、Torch CUDA、镜像 digest 与目标架构；CUDA 指纹包含 CUDA Runtime、NVCC、镜像 digest 与目标架构。温度、瞬时时钟、功耗和 GPU busy 等易变遥测只随快照记录，不参与 fingerprint，否则同一机器的连续运行会被错误判为不同环境。不能用空字符串或伪造值补齐 WSL 无法提供的遥测。
 
 ### 6.6 关系概览
 
@@ -222,15 +228,15 @@ erDiagram
 | `GET /api/environment?language=...` | 指定语言最近一次 GPU/Runner 环境快照；默认 `cuda_cpp`，熔断状态以 `/api/ready` 为准 |
 | `GET /api/problems` | 题目摘要列表 |
 | `GET /api/problems/{slug}` | 题面、`default_language`、各语言 implementation 的签名/starter/说明、限制和 revision；不返回内部测试 |
-| `GET /api/drafts/{problem_id}?language=...` | 获取该题指定语言的草稿；默认 `cuda_cpp` |
-| `PUT /api/drafts/{problem_id}` | 请求体携带语言，按 `(problem_id, language)` upsert 草稿；当前为后写覆盖 |
-| `POST /api/jobs` | 请求体携带语言，创建 `compile`、`run`、`validate`、`save_version` 或 `rebenchmark` Job；返回 202 和 Job ID |
+| `GET /api/drafts/{problem_id}?language=...` | 获取该题指定语言的草稿；省略语言时采用题目的 `default_language` |
+| `PUT /api/drafts/{problem_id}` | 按 `(problem_id, language)` upsert 草稿；省略语言时采用题目的 `default_language`，当前为后写覆盖 |
+| `POST /api/jobs` | 创建 `compile`、`run`、`validate`、`save_version` 或 `rebenchmark` Job；语言可省略并解析为题目的 `default_language`，返回 202 和 Job ID |
 | `GET /api/jobs/{job_id}` | 获取状态、阶段、逐公开用例结果和受限诊断 |
-| `GET /api/problems/{problem_id}/versions?language=...` | 可按语言列出手动保存版本和 benchmark 摘要；省略时列出两种语言 |
+| `GET /api/problems/{problem_id}/versions?language=...` | 可按语言列出手动保存版本和 benchmark 摘要；省略时列出该题全部实现语言 |
 | `PATCH /api/versions/{version_id}` | 仅修改名称和备注 |
 | `DELETE /api/versions/{version_id}?confirmed=true` | UI 二次确认后删除；缺少/否定确认参数返回 409 |
-| `GET /api/versions/duplicates?problem_id=...&language=...&source_hash=...` | 保存前在同题同语言内查询重复源码并提示用户 |
-| `POST /api/versions/compare` | 比较同题同语言的 2 至 8 个唯一版本并指定其中一个 baseline；拒绝混合语言 |
+| `GET /api/versions/duplicates?problem_id=...&language=...&source_hash=...` | 保存前在同题同语言内查询重复源码并提示用户；省略语言时采用题目的 `default_language` |
+| `POST /api/versions/compare` | 比较同题的 2 至 8 个唯一版本并指定其中一个 baseline；正常 UI 请求携带语言并拒绝不匹配版本，省略语言的兼容调用仍会把混合语言标为不可比较且不生成 speedup |
 | `GET /api/docs`、`GET /api/openapi.json` | 本地交互式 API 文档和 OpenAPI schema |
 
 保存版本和重测都通过 `POST /api/jobs` 进入同一状态机，`language` 是一等字段：`save_version` 请求还携带名称、备注、点击时源码和 `allow_duplicate`。服务在入队、Worker 开始及最终提交前按同题同语言检查重复；发现重复且未显式允许时返回/记录冲突，`allow_duplicate=true` 才允许继续。`rebenchmark` 请求携带同题、同语言的 1 至 8 个唯一版本 ID，混合语言会被拒绝。MVP 没有取消路由；状态枚举保留 `cancelled` 供受控关停或后续取消协议使用，浏览器断开不等同于取消 Job。
@@ -296,9 +302,10 @@ Worker 启动时只清理同时带 Runner 标记和当前 installation 标记的
 ```text
 CUDA:   源码快照 → 无 GPU 编译容器 → NVCC → 清理/截断诊断 → 清理产物 → Job 终态
 Triton: 源码快照 → 无 GPU 预检查容器 → 语法 + restricted_triton_v1 策略检查 → 清理/截断诊断 → Job 终态
+PyTorch: 源码快照 → 无 GPU 预检查容器 → 语法 + restricted_torch_v1 策略检查 → 清理/截断诊断 → Job 终态
 ```
 
-预检查/编译容器不获得 GPU，只生成临时产物，不创建 Version 或 BenchmarkRun。CUDA C++ 动作用 NVCC 完成编译和 harness 链接。Triton 预检先解析 AST，拒绝非白名单 import、模块级执行、反射、I/O、进程/线程、打印、dunder、动态执行及非白名单调用；随后在隔离 globals 中只加载字面量常量、`@triton.jit` 定义和直线式 `solve` launcher，不调用 `solve`，也不进行 GPU JIT。第一次带真实 Tensor 的 GPU 调用才完成对应参数/`tl.constexpr` 的 JIT 专化。因此 Triton“编译成功”不代表 Kernel 已经成功 JIT。诊断会删除宿主机路径、spool 路径和内部 harness 路径，保留用户文件名、行列号和关键错误；Runner 合并捕获 stdout/stderr，并对合并后的字节总量设限、标注超限或截断。
+预检查/编译容器不获得 GPU，只生成临时产物，不创建 Version 或 BenchmarkRun。CUDA C++ 动作用 NVCC 完成编译和 harness 链接。Triton 预检先解析 AST，拒绝非白名单 import、模块级执行、反射、I/O、进程/线程、打印、dunder、动态执行及非白名单调用；随后在隔离 globals 中只加载字面量常量、`@triton.jit` 定义和直线式 `solve` launcher，不调用 `solve`，也不进行 GPU JIT。第一次带真实 Tensor 的 GPU 调用才完成对应参数/`tl.constexpr` 的 JIT 专化，因此 Triton“编译成功”不代表 Kernel 已经成功 JIT。PyTorch 预检使用独立的 `restricted_torch_v1`，只加载字面量常量和单个精确签名的 `solve`，允许题面列出的基础 Tensor 组合，拒绝现成 attention、I/O、反射、动态执行、任意 helper、原地属性/下标赋值与 `out=`。诊断会删除宿主机路径、spool 路径和内部 harness 路径，保留用户文件名、行列号和关键错误；Runner 合并捕获 stdout/stderr，并对合并后的字节总量设限、标注超限或截断。
 
 ### 9.3 运行公开样例
 
@@ -306,7 +313,7 @@ Triton: 源码快照 → 无 GPU 预检查容器 → 语法 + restricted_triton_
 源码快照 → 无 GPU 编译 → GPU 运行容器 → 逐公开用例结果 → 清理 → Job 终态
 ```
 
-只有预检查/编译成功后才创建 GPU 容器。CUDA 运行临时程序；Triton harness 通过同一版本化策略把源码加载到独立 module globals，严格校验 `solve` 参数，并在第一次可信调用时触发 JIT 专化。返回每个公开用例的 pass/fail、公开输入摘要、错误类别和必要输出；不创建版本。容器初始化、Triton 首次 JIT 和用例准备等不作为可持久化性能成绩。
+只有预检查/编译成功后才创建 GPU 容器。CUDA 运行临时程序；Triton harness 通过同一版本化策略把源码加载到独立 module globals，严格校验 `solve` 参数，并在第一次可信调用时触发 JIT 专化；PyTorch harness 以独立策略加载 `solve`，检查返回 Tensor 的设备、dtype、形状、有限值、数值误差和输入不可变性。返回每个公开用例的 pass/fail、公开输入摘要、错误类别和必要输出；不创建版本。容器初始化、Triton 首次 JIT 和用例准备等不作为可持久化性能成绩。
 
 ### 9.4 完整验证
 
@@ -330,7 +337,7 @@ sequenceDiagram
     User->>API: 名称、备注、点击时源码快照
     API->>Q: 创建 save_version Job
     API-->>User: 202 + Job ID
-    W->>R: 无 GPU NVCC 编译或 Triton 语法/策略预检
+    W->>R: 无 GPU NVCC 编译或 Python 语法/策略预检
     R-->>W: 预检查/编译成功
     W->>R: 完整正确性验证
     R-->>W: 验证通过
@@ -353,7 +360,7 @@ sequenceDiagram
 - 仅平台选定语言的 benchmark harness 计时有效；完全忽略用户打印的时间。
 - benchmark 前必须使用同一源码快照重新完成完整正确性验证。
 - 单 GPU 串行执行，benchmark 之间不得重叠。
-- NVCC/Python 预检查、Triton 首次 JIT 专化、容器创建、CUDA context 初始化、输入生成、设备内存分配和 H2D/D2H 拷贝均在计时区间外。
+- NVCC/Python 预检查、Triton 首次 JIT 专化、容器创建、CUDA context 初始化、输入生成、设备内存分配和 H2D/D2H 拷贝均在计时区间外；PyTorch 返回 Tensor 的分配属于被测 `solve` 本身，计入其 GPU 时间。
 - 在同一 CUDA stream 上记录成对 CUDA Events；起点 event 在被测 kernel 前，终点 event 在 kernel/inner repetitions 后，并对终点正确同步。
 - 先完成配置规定的 warmup，再采集多次独立样本。极短 kernel 在一个 event 区间内执行固定 inner repetitions，以总 elapsed time 除以 repetitions。
 - 正式采样前，benchmark harness 在 warmup 后做一次 D2H 正确性保护检查；该拷贝和比较位于计时区间外。采样区间本身不混入 D2H 拷贝，且保存/重测流程此前已经完成独立的完整验证。
@@ -386,14 +393,14 @@ speedup(X) = median(B) / median(X)
 只有以下比较键全部相同，两个 BenchmarkRun 才标记为“可直接比较”：
 
 - 同一 problem slug 和 problem revision；
-- 同一实现语言；CUDA C++ 与 Triton 即使运行在同一 GPU 上也不进入同一比较请求；
+- 同一实现语言；CUDA C++、Triton 与 PyTorch 即使运行在同一 GPU 上也不进入同一比较请求；
 - 同一 suite hash 和输入规模集合；protocol version、随机种子、warmup 与 iterations 已纳入 suite hash，但仍单独展示；
-- 同一规范化执行配置；CUDA 记录 flags 与目标架构，Triton 记录 backend、Python/PyTorch/Triton/Torch CUDA 版本与目标架构；
+- 同一规范化执行配置；CUDA 记录 flags 与目标架构，Triton 记录 backend、策略、Python/PyTorch/Triton/Torch CUDA 与目标架构，PyTorch 还记录策略、matmul precision、TF32 与确定性设置；
 - 同一 environment fingerprint（包括语言、GPU/Compute Capability、驱动、对应工具链和 Runner 镜像 digest 等）。
 
-比较 API 和 UI 首先按语言分组并拒绝跨语言选择，不生成 CUDA C++ 对 Triton 的 speedup。对于同语言版本，任何其余字段不一致时，UI 必须明确标为“不可直接比较”，列出差异，不能生成统一排名或具有误导性的总 speedup；可以并排展示历史原始数据。用户可选择“使用当前统一环境重新测试所选版本”；系统先串行验证全部所选版本，再串行 benchmark 全部版本，并按 10.4 节批量追加新的 BenchmarkRun，不改变源码版本。
+UI 首先按语言分组，正常比较请求携带当前语言，API 会拒绝与该显式语言不匹配的版本。兼容调用省略语言时，后端仍把混合语言标为不可比较且不生成 CUDA C++、Triton 与 PyTorch 之间的 speedup。对于同语言版本，任何其余字段不一致时，UI 必须明确标为“不可直接比较”，列出差异，不能生成统一排名或具有误导性的总 speedup；可以并排展示历史原始数据。用户可选择“使用当前统一环境重新测试所选版本”；系统先串行验证全部所选版本，再串行 benchmark 全部版本，并按 10.4 节批量追加新的 BenchmarkRun，不改变源码版本。
 
-比较页对每个输入规模展示 median、p95、CV/MAD、样本数和相对 baseline 的 speedup，并同时展示实现语言、GPU、驱动、CUDA/NVCC 或 Python/PyTorch/Triton、执行配置、镜像 digest、suite hash 与协议版本。源码快照应只读展示，优先用 Monaco Diff 做两两差异查看；超过两个版本时由用户选择 diff 的左右两侧。
+比较页对每个输入规模展示 median、p95、CV/MAD、样本数和相对 baseline 的 speedup，并同时展示实现语言、GPU、驱动、CUDA/NVCC、Python/PyTorch/Triton 或纯 Python/PyTorch 工具链、执行配置、镜像 digest、suite hash 与协议版本。源码快照应只读展示，优先用 Monaco Diff 做两两差异查看；超过两个版本时由用户选择 diff 的左右两侧。
 
 温度、频率、功耗限制和后台 GPU 工作负载会造成波动。WSL2 未必能提供温度、时钟或 GPU busy，这些字段应显示 `unavailable`。即使 fingerprint 相同，本机结果也只是同一机器、相近运行条件下的经验测量，不代表跨机器绝对排名。
 
@@ -411,7 +418,9 @@ speedup(X) = median(B) / median(X)
 
 ### 11.1 假设与保护目标
 
-CUDA 提交可以是任意能被 NVCC 接受的 CUDA/C++；Triton 提交则必须通过版本化 AST 白名单，只能包含精确 import、受限字面量常量、`@triton.jit` 函数和直线式 `solve` launcher。两者仍可能包含无限循环、资源耗尽、越界访问或触发 GPU 异常的 Kernel。容器和 Runner 需要保护仓库、数据库、Docker daemon、主机普通文件和服务可用性，并避免内部测试经产品输出泄漏。
+CUDA 提交可以是任意能被 NVCC 接受的 CUDA/C++；Triton 提交必须通过版本化 AST 白名单，只能包含精确 import、受限字面量常量、`@triton.jit` 函数和直线式 `solve` launcher；PyTorch 提交必须通过另一套版本化 AST 白名单，只能包含精确 `import torch`、受限字面量常量和单个 `solve`。用户代码仍可能造成资源耗尽、越界访问或 GPU/运行时异常。容器和 Runner 需要保护仓库、数据库、Docker daemon、主机普通文件和服务可用性，并避免内部测试经产品输出泄漏。
+
+PyTorch 策略还必须保证 benchmark 所依赖的无持久状态不变量：模块常量只能是不可变标量或递归不可变 tuple，`solve` 及每层条件分支都重复执行语句白名单，禁止 helper、循环、嵌套 import、增量/原地赋值和全局状态修改。这样同一输入在固定确定性环境中的各次调用不能根据隐藏调用计数改变算法；benchmark 才可以在预热前、预热后和计时后进行代表性正确性复查，而不是把用户可控状态当成可信前提。
 
 本地操作者本身被视为可信：他可以访问工作站、仓库和 Docker。项目不尝试防御拥有 Windows/WSL/Docker 管理权限的用户。
 
@@ -423,7 +432,7 @@ Worker 是受信控制平面组件。为了创建一次性容器，它可能需�
 
 - 按语言固定 `nvidia/cuda:12.4.1-devel-ubuntu22.04` 或官方 PyTorch 2.5.1 CUDA 12.4 devel 镜像的审计 digest，并记录实际 RepoDigest，禁止 `latest`；
 - 非 root UID/GID，`--network none`，只读 root filesystem；
-- CUDA 容器只提供 64 MiB、`nosuid,nodev,noexec` 的 `/tmp` tmpfs。Triton 为 JIT 生成和加载缓存提供 512 MiB、`nosuid,nodev,exec` 的 `/tmp` tmpfs，并把 `TRITON_CACHE_DIR`、`XDG_CACHE_HOME`、`PYTHONPYCACHEPREFIX`、`TORCHINDUCTOR_CACHE_DIR` 都指向其中；除该临时区外仍禁止写入镜像其他位置；
+- CUDA 容器只提供 64 MiB、`nosuid,nodev,noexec` 的 `/tmp` tmpfs。Triton 为 JIT 生成和加载缓存提供 512 MiB、`nosuid,nodev,exec` 的 `/tmp` tmpfs；纯 PyTorch 提供 512 MiB、`nosuid,nodev,noexec` 的 `/tmp`，因为该题型不允许运行时编译。Python 缓存目录均指向临时区；除该临时区外仍禁止写入镜像其他位置；
 - `--cap-drop=ALL`、`no-new-privileges=true`，并保留 Docker 默认启用的内置 seccomp profile（绝不使用 `seccomp=unconfined`）；
 - private PID/IPC，不使用 host PID、host IPC 或 host network；
 - 默认 2 CPU、2 GiB memory/swap、128 PID、64 MiB 文件大小，以及可配置的合并 stdout/stderr 上限；
@@ -436,12 +445,14 @@ Worker 是受信控制平面组件。为了创建一次性容器，它可能需�
 | --- | --- | --- | --- |
 | CUDA 编译 | 当前 Job 下的 `compile-validator/` 或 `compile-benchmark/`，仅含规范化 `source.cu`、`solve.h`、选定的 `platform.cu`，以及本阶段生成的 `program` | `/work` 可写，以便非 root NVCC 生成临时目标和可执行文件 | 无，不传 `--gpus` |
 | Triton 预检 | 当前 Job 下的对应 `compile-*`，仅含只读 `source.py`、选定的 `platform.py` 与 `submission_policy.py` | bind mount readonly；Python 执行语法/AST 白名单与安全定义加载，临时文件写入 `/tmp` | 无，不传 `--gpus` |
+| PyTorch 预检 | 当前 Job 下的对应 `compile-*`，仅含只读 `source.py`、选定的 `platform.py` 与 PyTorch `submission_policy.py` | bind mount readonly；Python 执行语法/AST 白名单与安全定义加载 | 无，不传 `--gpus` |
 | CUDA 公开运行/完整验证/benchmark | 新建的 `run-public/`、`run-full/` 或 `run-benchmark/`，只复制最终 `program` | bind mount readonly，程序只读/可执行 | 仅 `--gpus device=0` |
 | Triton 公开运行/完整验证/benchmark | 新建的对应 `run-*`，只复制 `source.py`、选定的 `platform.py` 与版本化 `submission_policy.py` | bind mount readonly；JIT 缓存只写入 512 MiB `/tmp` | 仅 `--gpus device=0` |
+| PyTorch 公开运行/完整验证/benchmark | 新建的对应 `run-*`，只复制 `source.py`、选定的 `platform.py` 与版本化 `submission_policy.py` | bind mount readonly；临时缓存只写入 noexec `/tmp` | 仅 `--gpus device=0` |
 
 用户容器从不挂载仓库根目录、数据库、Docker socket或宽泛宿主目录。禁止 `--privileged`。正常退出依靠 `--rm`；超时或输出超限时 Runner 强制删除已知容器名，Job 的 `finally` 再清理整个 spool。Worker 重启只按 `com.myleetgpu.runner=true` 与当前 installation 双重 label 回收遗留容器；租约丢失时再加 owner label 限定，不会匹配 API、Worker、Web 或其他 clone 的 Compose 容器。
 
-CUDA 编译阶段需要平台 harness 完成链接，运行容器只接收最终二进制；Triton 必须在 GPU 阶段加载受限定义并 JIT，因此只读运行目录包含 `source.py`、选定的单个平台 harness 和无测试数据的策略 sidecar。策略拒绝文件读取、反射、动态执行、打印及结果通道伪造，harness 在加载提交前捕获可信判定、计时和结果编码引用。两者都不挂载题目仓库或其他测试文件。对浏览器的响应和普通日志还会过滤内部测试输入、参考输出及真实 harness/Job 路径。由于本项目面向能直接读取本地仓库的可信操作者，“内部测试不泄漏”是产品输出边界，而不是针对本机管理员的保密承诺。
+CUDA 编译阶段需要平台 harness 完成链接，运行容器只接收最终二进制；Triton 必须在 GPU 阶段加载受限定义并 JIT；PyTorch 则在 GPU 阶段加载受限的高层 Tensor 函数。两类 Python 只读运行目录都包含 `source.py`、选定的单个平台 harness 和无测试数据的策略 sidecar。策略拒绝文件读取、反射、动态执行、打印及结果通道伪造，harness 在加载提交前捕获可信判定、计时和结果编码引用。所有语言都不挂载题目仓库或其他测试文件。对浏览器的响应和普通日志还会过滤内部测试输入、参考输出及真实 harness/Job 路径。由于本项目面向能直接读取本地仓库的可信操作者，“内部测试不泄漏”是产品输出边界，而不是针对本机管理员的保密承诺。
 
 ### 11.3 无法提供的保证
 
@@ -449,7 +460,7 @@ NVIDIA 容器运行时仍共享宿主内核、Windows 驱动和物理 GPU。RTX 
 
 因此，“认证入口 + 容器”只是在可信单机/局域网前提下的纵深防御，不构成公网沙箱、安全边界证明或多租户隔离。若未来需要接收不可信远程用户，必须改为独占机器/虚拟机或可验证的硬件级隔离，并加入身份、授权、速率限制、审计、传输加密和主机级恢复机制。
 
-Validator/benchmark harness 与提交的 Kernel 仍处于同一最终进程：CUDA 通过链接，Triton 通过受限定义加载。CUDA 的结果 sentinel 不是抗主动作弊的加密边界；Triton 的 `restricted_triton_v1` 会在执行前拒绝 host I/O、反射、进程终止、host/device 打印和非白名单调用，从而阻断已知的 `__main__` 篡改、harness 读取及伪造 sentinel/样本路径，但它不是通用 Python 沙箱的形式化证明。平台仍只面向可信本机/LAN 操作者，不应把当前结果用于不可信用户排名或公网竞赛；若要接收对抗性远程提交，必须把受信判定与用户执行拆到独立保护域和结果通道。
+Validator/benchmark harness 与提交仍处于同一最终进程：CUDA 通过链接，Triton/PyTorch 通过各自的受限定义加载。CUDA 的结果 sentinel 不是抗主动作弊的加密边界；`restricted_triton_v1` 与 `restricted_torch_v1` 会在执行前拒绝 host I/O、反射、进程终止、打印和非白名单调用，从而阻断已知的 harness 读取及伪造 sentinel/样本路径，但它们不是通用 Python 沙箱的形式化证明。平台仍只面向可信本机/LAN 操作者，不应把当前结果用于不可信用户排名或公网竞赛；若要接收对抗性远程提交，必须把受信判定与用户执行拆到独立保护域和结果通道。
 
 ## 12. 错误处理、熔断与恢复
 
@@ -457,9 +468,9 @@ Validator/benchmark harness 与提交的 Kernel 仍处于同一最终进程：CU
 
 | 类别 | 示例 | 用户可见行为 |
 | --- | --- | --- |
-| `compile_error` | NVCC 语法/类型/链接错误，Python 语法错误，或第一次 GPU 调用中的 Triton JIT/PTXAS 错误 | 行列号和清理后的诊断；Triton 会标明语法检查或 GPU 专化阶段 |
+| `compile_error` | NVCC 语法/类型/链接错误，Python 语法/策略错误，或第一次 GPU 调用中的 Triton JIT/PTXAS 错误 | 行列号和清理后的诊断；Triton 会标明语法检查或 GPU 专化阶段 |
 | `wrong_answer` | 值不匹配、非法 NaN/Inf | 公开测试可显示有限详情；内部测试只显示安全摘要 |
-| `runtime_error` | 非零退出、CUDA error、非法访问或 Python/Triton 运行异常 | 稳定错误码、退出信息和限长合并输出 |
+| `runtime_error` | 非零退出、CUDA error、非法访问或 Python 运行异常 | 稳定错误码、退出信息和限长合并输出 |
 | `output_limit` | 合并 stdout/stderr 超限 | 终止任务并明确标注输出超限 |
 | `timeout` | 任一阶段超过 wall time | Job 进入 `timed_out`，终止容器并清理 |
 | `runner_unhealthy` | GPU/驱动/容器探测、固定语言镜像缺失或运行链路异常 | Job 进入 `system_error`；共享 GPU 熔断或仅语言工具链不可用由诊断区分 |
@@ -514,7 +525,7 @@ Validator/benchmark harness 与提交的 Kernel 仍处于同一最终进程：CU
 3. **SQLAlchemy 2 + SQLite WAL + Alembic。** 对本机单用户足够，支持事务化版本保存和轻量 Job 队列；不宣称适合多主机或高写入并发。
 4. **独立 Worker + SQLite 队列。** 避免请求线程执行 Docker，并用租约支持崩溃恢复；MVP 不增加 Redis/Celery 运维面。
 5. **Runner adapter 边界。** Worker 只调用分语言的预检查/编译、执行、探测和清理方法，不接触 Docker argv；这既便于用 fake runner 做非 GPU 测试，也集中审计参数、超时和清理。
-6. **固定镜像和可复现题目协议。** CUDA 与 Triton 使用各自固定工具链镜像；实现语言、镜像 digest、suite hash、revision、环境指纹和执行配置共同定义测量上下文。
+6. **固定镜像和可复现题目协议。** CUDA 使用固定 CUDA 镜像，Triton 与 PyTorch 共用固定 PyTorch/Triton 镜像但保留独立 backend 身份；实现语言、镜像 digest、suite hash、revision、环境指纹和执行配置共同定义测量上下文。
 7. **同源、默认 loopback。** 默认降低部署复杂度和意外暴露风险；显式 LAN overlay 使用单一接口、共享 Basic Auth 和 LocalSubnet 防火墙规则，但不把它宣称为账号或多租户权限系统。
 8. **轮询 Job 状态。** MVP 可靠且容易恢复；未来可加 SSE，但不改变持久状态机。
 
@@ -522,10 +533,10 @@ Validator/benchmark harness 与提交的 Kernel 仍处于同一最终进程：CU
 
 ### 15.1 已知限制
 
-- 只支持单机、单用户、CUDA C++ / Triton (Python) 和一张 GPU；没有账号系统。可选 LAN 模式只是受信任局域网的共享认证入口。
+- 只支持单机、单用户、CUDA C++ / Triton (Python) / PyTorch (Python) 和一张 GPU；没有账号系统。可选 LAN 模式只是受信任局域网的共享认证入口。
 - SQLite 队列和单 Worker 优先保证确定性，不追求吞吐量。
 - 草稿是后写覆盖，不解决多标签页冲突；Job 元数据和环境快照尚无自动保留期。
-- Docker/消费级 GPU 对恶意 CUDA C++ 或 Python/Triton 代码没有强隔离；只能供可信本机或受信任局域网操作者使用。
+- Docker/消费级 GPU 对恶意 CUDA C++、Triton 或 PyTorch 代码没有强隔离；只能供可信本机或受信任局域网操作者使用。
 - WSL2 可能无法提供温度、功耗、时钟和 GPU busy；结果会受到桌面图形与后台任务影响。
 - benchmark 只适合比较同一语言、同一环境和统一协议下的版本，不是跨语言 speedup，也不是跨机器排行榜。
 - 不支持 Debug、Profiler、PTX/Assembly 或运行任意可执行入口。
@@ -544,7 +555,7 @@ Validator/benchmark harness 与提交的 Kernel 仍处于同一最终进程：CU
 - 编译、运行、验证、草稿自动保存不会增加 Version 数量。
 - 只有显式保存且重新验证、benchmark 全成功，Version 与 BenchmarkRun 才在同一事务出现。
 - 用户代码永远不参与构造 shell 字符串、路径、任意 NVCC flags 或 Python 启动参数。
-- CUDA 编译目录精确可写且无 GPU；Triton 语法/策略预检目录精确只读且无 GPU。执行容器只读挂载对应语言所需的最小 artifact，并只获得 GPU 0。两类用户容器均无网络、无 Docker socket、无仓库/数据库挂载，且保留 Docker 默认内置 seccomp profile；Triton 只额外获得 JIT 必需的 512 MiB 可执行临时文件系统。
+- CUDA 编译目录精确可写且无 GPU；Triton/PyTorch 语法与策略预检目录精确只读且无 GPU。执行容器只读挂载对应语言所需的最小 artifact，并只获得 GPU 0。所有用户容器均无网络、无 Docker socket、无仓库/数据库挂载，且保留 Docker 默认内置 seccomp profile；仅 Triton 获得 JIT 必需的 512 MiB 可执行临时文件系统，PyTorch 的同尺寸临时区为 noexec。
 - GPU Job 严格串行；所有终态都触发容器和 spool 清理。
 - 内部测试和路径不会经 API、日志或 NVCC 诊断泄漏。
 - 不同实现语言不能进入同一比较或重测请求，也不生成 speedup；同语言但 revision、suite、执行配置或环境指纹不同的成绩不会被标为可直接比较。

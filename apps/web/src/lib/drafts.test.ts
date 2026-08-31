@@ -7,8 +7,10 @@ describe('local drafts', () => {
   it('persists independent drafts per problem and implementation language', () => {
     const cuda = saveLocalDraft('vector-add', 'cuda_cpp', '__global__ void solve() {}')
     const triton = saveLocalDraft('vector-add', 'triton_python', '@triton.jit\ndef solve(): ...')
+    const torch = saveLocalDraft('vector-add', 'torch_python', 'def solve(q, k, v): ...')
     expect(readLocalDraft('vector-add', 'cuda_cpp')).toEqual(cuda)
     expect(readLocalDraft('vector-add', 'triton_python')).toEqual(triton)
+    expect(readLocalDraft('vector-add', 'torch_python')).toEqual(torch)
     expect(readLocalDraft('reduction', 'cuda_cpp')).toBeNull()
   })
 
@@ -20,6 +22,7 @@ describe('local drafts', () => {
   it('migrates a legacy problem draft only into CUDA C++ storage', () => {
     localStorage.setItem('myleetgpu:draft:vector-add', JSON.stringify({ source: '// legacy', updatedAt: '2026-01-01T00:00:00Z' }))
     expect(readLocalDraft('vector-add', 'triton_python')).toBeNull()
+    expect(readLocalDraft('vector-add', 'torch_python')).toBeNull()
     expect(readLocalDraft('vector-add', 'cuda_cpp')).toEqual({ language: 'cuda_cpp', source: '// legacy', updatedAt: '2026-01-01T00:00:00Z' })
     expect(localStorage.getItem('myleetgpu:draft:vector-add')).toBeNull()
   })

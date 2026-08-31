@@ -35,7 +35,7 @@ export function localComparability(versions: SavedVersion[]): { comparable: bool
     const latest = latestBenchmarkRun(version)
     return JSON.stringify(latest?.compiler_flags ?? latest?.compile_flags ?? version.compile_flags)
   }).size > 1) {
-    reasons.push('编译配置不一致')
+    reasons.push('执行配置不一致')
   }
   if (values((version) => runFingerprint(latestBenchmarkRun(version))).size > 1) reasons.push('运行环境指纹不一致')
   const sizes = versions.map((version) => latestMetrics(version).map((metric) => String(metric.size)).sort().join('|'))

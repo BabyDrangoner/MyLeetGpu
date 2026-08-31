@@ -13,7 +13,9 @@ from pydantic import ValidationError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PROBLEMS_ROOT = PROJECT_ROOT / "problems"
-EXPECTED_SLUGS = {"vector-addition", "matrix-transpose", "reduction"}
+KERNEL_SLUGS = {"vector-addition", "matrix-transpose", "reduction"}
+TORCH_SLUGS = {"multi-head-attention", "grouped-query-attention"}
+EXPECTED_SLUGS = KERNEL_SLUGS | TORCH_SLUGS
 
 
 @pytest.fixture(scope="module")
@@ -25,13 +27,15 @@ def load_raw_manifest(slug: str = "vector-addition") -> dict[str, object]:
     return yaml.safe_load((PROBLEMS_ROOT / slug / "problem.yaml").read_text(encoding="utf-8"))
 
 
-def test_catalog_loads_exactly_the_three_builtin_original_problems(catalog: ProblemCatalog) -> None:
-    assert len(catalog) == 3
+def test_catalog_loads_all_five_builtin_original_problems(catalog: ProblemCatalog) -> None:
+    assert len(catalog) == 5
     assert {problem.manifest.slug for problem in catalog.list()} == EXPECTED_SLUGS
 
 
-@pytest.mark.parametrize("slug", sorted(EXPECTED_SLUGS))
-def test_each_builtin_problem_loads_all_required_assets(catalog: ProblemCatalog, slug: str) -> None:
+@pytest.mark.parametrize("slug", sorted(KERNEL_SLUGS))
+def test_each_kernel_problem_loads_cuda_and_triton_assets(
+    catalog: ProblemCatalog, slug: str
+) -> None:
     problem = catalog.get(slug)
 
     assert problem.root == (PROBLEMS_ROOT / slug).resolve()
@@ -84,6 +88,44 @@ def test_each_builtin_problem_loads_all_required_assets(catalog: ProblemCatalog,
     assert problem.manifest.benchmark.warmup > 0
     assert problem.manifest.benchmark.iterations >= 3
     assert problem.suite_hash and len(problem.suite_hash) == 64
+
+
+@pytest.mark.parametrize("slug", sorted(TORCH_SLUGS))
+def test_each_attention_problem_is_torch_only_and_uses_its_default_assets(
+    catalog: ProblemCatalog, slug: str
+) -> None:
+    problem = catalog.get(slug)
+
+    assert problem.root == (PROBLEMS_ROOT / slug).resolve()
+    assert problem.manifest.schema_version == 2
+    assert problem.statement_markdown.strip()
+    assert problem.default_language is KernelLanguage.TORCH_PYTHON
+    assert problem.supported_languages == (KernelLanguage.TORCH_PYTHON,)
+
+    implementation = problem.get_implementation()
+    assert implementation.language is KernelLanguage.TORCH_PYTHON
+    assert implementation.source_suffix == ".py"
+    assert implementation.editor_language == "python"
+    assert implementation.display_name == "PyTorch Python"
+    assert implementation.header_path is None
+    assert implementation.compile_flags == []
+    assert implementation.toolchain_profile == "torch_cuda_v1"
+    assert implementation.starter_code.strip()
+    assert "def solve(" in implementation.starter_code
+    assert implementation.statement_appendix
+    assert "torch.Tensor" in implementation.statement_appendix
+    assert implementation.validator_path.is_file()
+    assert implementation.benchmark_path.is_file()
+    assert implementation.signature.symbol == "solve"
+    assert len(implementation.suite_hash) == 64
+
+    assert problem.starter_code == implementation.starter_code
+    assert problem.header_path is None
+    assert problem.validator_path == implementation.validator_path
+    assert problem.benchmark_path == implementation.benchmark_path
+    assert problem.suite_hash == implementation.suite_hash
+    with pytest.raises(KeyError, match="does not support language: cuda_cpp"):
+        problem.get_implementation(KernelLanguage.CUDA_CPP)
 
 
 def test_catalog_order_is_stable(catalog: ProblemCatalog) -> None:
@@ -201,13 +243,44 @@ def test_public_problem_payload_never_leaks_internal_tests_or_harness_paths(
     assert all(item["name"] != "stream" for item in detail["types"]["inputs"])
 
 
+def test_public_torch_problem_payload_uses_default_language_without_leaking_harness(
+    catalog: ProblemCatalog,
+) -> None:
+    problem = catalog.get("multi-head-attention")
+
+    detail = problem.public_detail()
+    serialized = repr(detail)
+
+    assert detail["language"] == "torch_python"
+    assert detail["default_language"] == "torch_python"
+    assert detail["supported_languages"] == ["torch_python"]
+    assert set(detail["implementations"]) == {"torch_python"}
+    assert detail["starter_code"] == problem.get_implementation().starter_code
+    assert detail["implementations"]["torch_python"]["display_name"] == "PyTorch Python"
+    assert detail["implementations"]["torch_python"]["source_suffix"] == ".py"
+    assert "internal" not in detail
+    assert "public" not in detail
+    assert "harness" not in detail
+    assert "suite_seed" not in serialized
+    assert "torch_cuda_v1" not in serialized
+    assert "restricted_torch_v1" not in serialized
+
+
 def test_public_summary_does_not_include_source_or_test_configuration(
     catalog: ProblemCatalog,
 ) -> None:
     summary = catalog.get("vector-addition").public_summary()
 
-    assert set(summary) == {"slug", "title", "difficulty", "revision", "summary"}
+    assert set(summary) == {
+        "slug",
+        "title",
+        "difficulty",
+        "revision",
+        "summary",
+        "languages",
+    }
     assert summary["summary"]
+    assert summary["languages"] == ["cuda_cpp", "triton_python"]
 
 
 def test_unknown_problem_has_a_clear_error(catalog: ProblemCatalog) -> None:
@@ -278,6 +351,14 @@ def test_manifest_rejects_unsafe_or_incomplete_protocols(
         ProblemManifest.model_validate(raw)
 
 
+def test_torch_runtime_profile_is_fixed_by_the_manifest_schema() -> None:
+    raw = load_raw_manifest("multi-head-attention")
+    raw["implementations"]["torch_python"]["runtime"]["profile"] = "install-at-runtime"  # type: ignore[index]
+
+    with pytest.raises(ValidationError, match="profile"):
+        ProblemManifest.model_validate(raw)
+
+
 @pytest.mark.parametrize(
     ("field", "configured", "limit"),
     [
@@ -337,7 +418,7 @@ def _literal_assignments(path: Path) -> dict[str, object]:
     return values
 
 
-@pytest.mark.parametrize("slug", sorted(EXPECTED_SLUGS))
+@pytest.mark.parametrize("slug", sorted(KERNEL_SLUGS))
 def test_triton_assets_are_valid_python_and_mirror_benchmark_manifest(
     catalog: ProblemCatalog, slug: str
 ) -> None:
@@ -378,3 +459,53 @@ def test_triton_assets_are_valid_python_and_mirror_benchmark_manifest(
     assert isinstance(cases, tuple)
     assert [case[0] for case in cases] == [size.label for size in configured_sizes]
     assert [case[-1] for case in cases] == [size.inner_repetitions for size in configured_sizes]
+
+
+@pytest.mark.parametrize("slug", sorted(TORCH_SLUGS))
+def test_torch_assets_are_valid_python_and_mirror_benchmark_manifest(
+    catalog: ProblemCatalog, slug: str
+) -> None:
+    problem = catalog.get(slug)
+    implementation = problem.get_implementation(KernelLanguage.TORCH_PYTHON)
+
+    for path in (
+        implementation.starter_path,
+        implementation.validator_path,
+        implementation.benchmark_path,
+    ):
+        source = path.read_text(encoding="utf-8")
+        compile(source, str(path), "exec")
+
+    validator = implementation.validator_path.read_text(encoding="utf-8")
+    benchmark = implementation.benchmark_path.read_text(encoding="utf-8")
+    assignments = _literal_assignments(implementation.benchmark_path)
+
+    assert "def solve(" in implementation.starter_code
+    assert "scaled_dot_product_attention" not in implementation.starter_code
+    assert "torch.cuda.stream(stream)" in validator
+    assert "torch.cuda.stream(stream)" in benchmark
+    assert "torch.cuda.Event(enable_timing=True)" in benchmark
+    for harness in (validator, benchmark):
+        assert "isinstance(output, torch.Tensor)" in harness
+        assert 'output.device.type != "cuda"' in harness
+        assert "output.dtype != torch.float32" in harness
+        assert "tuple(output.shape)" in harness
+        assert "torch.isfinite" in harness
+        assert "tensor.clone() for tensor" in harness
+        assert "untyped_storage().data_ptr()" in harness
+        assert "torch.backends.cuda.matmul.allow_tf32 = False" in harness
+        assert "torch.backends.cudnn.allow_tf32 = False" in harness
+        assert 'torch.set_float32_matmul_precision("highest")' in harness
+        assert "torch.use_deterministic_algorithms(True)" in harness
+    assert validator.count("MYLEETGPU_RESULT=") == 1
+    assert benchmark.count("MYLEETGPU_RESULT=") == 1
+    assert assignments["PROTOCOL_VERSION"] == problem.manifest.benchmark.protocol_version
+    assert assignments["WARMUP"] == problem.manifest.benchmark.warmup
+    assert assignments["ITERATIONS"] == problem.manifest.benchmark.iterations
+
+    cases = assignments["CASES"]
+    assert isinstance(cases, tuple)
+    assert [case[0] for case in cases] == [size.label for size in problem.manifest.benchmark.sizes]
+    assert [case[-1] for case in cases] == [
+        size.inner_repetitions for size in problem.manifest.benchmark.sizes
+    ]

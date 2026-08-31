@@ -1,14 +1,16 @@
 import { expect, test } from '@playwright/test'
-import { installMockApi, starterSource, tritonStarterSource } from './mock-api'
+import { installMockApi, starterSource, torchStarterSource, tritonStarterSource } from './mock-api'
 
-test('loads three original problems and opens the CUDA workspace', async ({ page }) => {
+test('loads all five problems and opens the CUDA workspace', async ({ page }) => {
   await installMockApi(page)
   await page.goto('/problems')
 
-  await expect(page.getByRole('heading', { name: '把想法变成更快的 Kernel' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '把想法变成可靠、快速的实现' })).toBeVisible()
   await expect(page.getByRole('link', { name: /向量逐元素相加/ })).toBeVisible()
   await expect(page.getByRole('link', { name: /行主序矩阵转置/ })).toBeVisible()
   await expect(page.getByRole('link', { name: /单精度向量求和归约/ })).toBeVisible()
+  await expect(page.getByRole('link', { name: /多头注意力/ })).toBeVisible()
+  await expect(page.getByRole('link', { name: /分组查询注意力/ })).toBeVisible()
   await page.getByRole('link', { name: /向量逐元素相加/ }).click()
 
   await expect(page.getByRole('heading', { name: '向量逐元素相加', level: 1 }).first()).toBeVisible()
@@ -81,6 +83,20 @@ test('switches to Triton with a language-scoped starter, URL and job payload', a
   await expect(page.getByText('solution.cu')).toBeVisible()
 })
 
+test('opens a torch-only attention problem with a language-scoped Python session', async ({ page }) => {
+  const state = await installMockApi(page)
+  await page.goto('/problems/multi-head-attention?language=cuda_cpp')
+
+  await expect(page).toHaveURL(/language=torch_python/)
+  await expect(page.getByRole('heading', { name: '多头注意力', level: 1 }).first()).toBeVisible()
+  await expect(page.getByText('solution.py')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'PyTorch (Python)' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'CUDA C++' })).toHaveCount(0)
+  await page.getByRole('button', { name: '代码检查' }).click()
+  await expect(page.getByText('PyTorch 代码检查失败')).toBeVisible()
+  expect(state.submittedJobs.at(-1)).toMatchObject({ action: 'compile', language: 'torch_python', source: torchStarterSource })
+})
+
 test('shows the independently probed Triton toolchain environment', async ({ page }) => {
   await installMockApi(page)
   await page.goto('/environment')
@@ -89,4 +105,8 @@ test('shows the independently probed Triton toolchain environment', async ({ pag
   await page.getByRole('button', { name: 'Triton (Python)' }).click()
   await expect(page.getByText('Python / PyTorch / Triton')).toBeVisible()
   await expect(page.getByText('3.11.10 / 2.5.1+cu124 / 3.2.0')).toBeVisible()
+
+  await page.getByRole('button', { name: 'PyTorch (Python)' }).click()
+  await expect(page.getByText('Python / PyTorch / Torch CUDA')).toBeVisible()
+  await expect(page.getByText('3.11.10 / 2.5.1+cu124 / 12.6')).toBeVisible()
 })

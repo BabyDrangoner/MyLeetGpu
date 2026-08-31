@@ -1,15 +1,30 @@
-import { render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { cleanup, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CodeDiff, CodeEditor } from './CodeEditor'
 
 vi.mock('../monaco', () => ({}))
+afterEach(cleanup)
 
 describe('language-aware code editors', () => {
   it('uses a Python model and .py path for Triton', () => {
     render(<CodeEditor value="# triton" language="triton_python" problemId="vector-addition" />)
-    const editor = screen.getByLabelText('Triton Python 代码编辑器')
+    const editor = screen.getByLabelText('Triton (Python) 代码编辑器')
     expect(editor).toHaveAttribute('data-editor-language', 'python')
-    expect(editor).toHaveAttribute('data-editor-path', 'solution.py')
+    expect(editor).toHaveAttribute('data-editor-path', '/problems/vector-addition/triton_python/solution.py')
+  })
+
+  it('isolates PyTorch and Triton in separate Python models', () => {
+    render(
+      <>
+        <CodeEditor value="# triton" language="triton_python" problemId="attention" />
+        <CodeEditor value="# torch" language="torch_python" problemId="attention" />
+      </>,
+    )
+    const triton = screen.getByLabelText('Triton (Python) 代码编辑器')
+    const torch = screen.getByLabelText('PyTorch (Python) 代码编辑器')
+    expect(torch).toHaveAttribute('data-editor-language', 'python')
+    expect(torch).toHaveAttribute('data-editor-path', '/problems/attention/torch_python/solution.py')
+    expect(torch.getAttribute('data-editor-path')).not.toBe(triton.getAttribute('data-editor-path'))
   })
 
   it('uses C++ highlighting for CUDA diffs', () => {

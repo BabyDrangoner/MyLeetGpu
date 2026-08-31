@@ -26,6 +26,26 @@ def solve(a: torch.Tensor, b: torch.Tensor, output: torch.Tensor, n: int) -> Non
     add_kernel[(triton.cdiv(n, 256),)](a, b, output, n, BLOCK_SIZE=256)
 `
 
+export const torchStarterSource = `import torch
+
+def solve(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    raise NotImplementedError("Implement attention with PyTorch tensor operations")
+`
+
+type MockLanguage = 'cuda_cpp' | 'triton_python' | 'torch_python'
+
+function sourceForLanguage(language: MockLanguage, id: string) {
+  if (language === 'triton_python') return tritonStarterSource
+  if (language === 'torch_python') return torchStarterSource
+  return id === 'v1' ? starterSource : starterSource.replace('const int index', '// float4 path\n  const int index')
+}
+
+function executionConfig(language: MockLanguage) {
+  if (language === 'triton_python') return ['triton-autotune=off']
+  if (language === 'torch_python') return ['backend=torch_python', 'torch=2.5.1', 'deterministic=true']
+  return ['--std=c++17', '-O3']
+}
+
 const environment = {
   id: 'env-1',
   healthy: true,
@@ -49,10 +69,26 @@ const problems = [
   { slug: 'vector-addition', title: '向量逐元素相加', difficulty: 'easy', revision: '1', summary: '实现高吞吐的逐元素相加。', languages: ['cuda_cpp', 'triton_python'] },
   { slug: 'matrix-transpose', title: '行主序矩阵转置', difficulty: 'medium', revision: '1', summary: '使用共享内存完成矩阵转置。', languages: ['cuda_cpp', 'triton_python'] },
   { slug: 'reduction', title: '单精度向量求和归约', difficulty: 'hard', revision: '1', summary: '实现稳定的并行归约。', languages: ['cuda_cpp', 'triton_python'] },
+  { slug: 'multi-head-attention', title: '多头注意力', difficulty: 'medium', revision: '1', summary: '使用 PyTorch 张量操作实现多头注意力。', languages: ['torch_python'] },
+  { slug: 'grouped-query-attention', title: '分组查询注意力', difficulty: 'hard', revision: '1', summary: '使用 PyTorch 实现 GQA 的分组键值共享。', languages: ['torch_python'] },
 ]
 
 function problemDetail(slug: string) {
   const summary = problems.find((item) => item.slug === slug) ?? problems[0]
+  if (summary.languages.includes('torch_python')) {
+    return {
+      ...summary,
+      default_language: 'torch_python',
+      implementations: {
+        torch_python: { language: 'torch_python', display_name: 'PyTorch (Python)', source_suffix: '.py', editor_language: 'python', starter_code: torchStarterSource, signature: { symbol: 'solve', declaration: 'def solve(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor' } },
+      },
+      statement_markdown: '## 任务\n\n仅使用 PyTorch 张量操作实现注意力函数。',
+      starter_code: torchStarterSource,
+      signature: { symbol: 'solve', declaration: 'def solve(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor' },
+      constraints: { dtype: 'torch.float32', device: 'cuda' },
+      benchmark: { protocol_version: '1', sizes: [{ label: 'small' }, { label: 'medium' }], warmup: 8, iterations: 20 },
+    }
+  }
   return {
     ...summary,
     default_language: 'cuda_cpp',
@@ -68,24 +104,24 @@ function problemDetail(slug: string) {
   }
 }
 
-function savedVersion(id: string, name: string, medianScale: number, fingerprint = environment.fingerprint, language: 'cuda_cpp' | 'triton_python' = 'cuda_cpp') {
+function savedVersion(id: string, name: string, medianScale: number, fingerprint = environment.fingerprint, language: MockLanguage = 'cuda_cpp') {
   return {
     id,
-    problem_id: 'vector-addition',
+    problem_id: language === 'torch_python' ? 'multi-head-attention' : 'vector-addition',
     problem_revision: '1',
     language,
     name,
     notes: id === 'v1' ? '直接加载实现' : '使用向量化访存',
     source_hash: id.repeat(64).slice(0, 64),
-    source_code: language === 'triton_python' ? tritonStarterSource : id === 'v1' ? starterSource : starterSource.replace('const int index', '// float4 path\n  const int index'),
+    source_code: sourceForLanguage(language, id),
     created_at: '2026-08-16T01:00:00Z',
     correctness_status: 'passed',
-    compile_flags: language === 'triton_python' ? ['triton-autotune=off'] : ['--std=c++17', '-O3'],
+    compile_flags: executionConfig(language),
     benchmark_runs: [{
       id: `run-${id}`,
       suite_hash: 'suite-e2e',
       protocol_version: '1',
-      compile_flags: language === 'triton_python' ? ['triton-autotune=off'] : ['--std=c++17', '-O3'],
+      compile_flags: executionConfig(language),
       input_sizes: ['64K', '1M'],
       seed: 424242,
       warmup: 8,
@@ -106,9 +142,13 @@ export interface MockApiState {
   deleteConfirmed: boolean
 }
 
-export async function installMockApi(page: Page, options: { versions?: boolean; comparable?: boolean; tritonVersion?: boolean } = {}) {
+export async function installMockApi(page: Page, options: { versions?: boolean; comparable?: boolean; tritonVersion?: boolean; torchVersions?: boolean } = {}) {
   const initialVersions = options.versions ? [savedVersion('v1', '直接加载', 1), savedVersion('v2', '向量化 float4', 0.72, options.comparable === false ? 'different-env' : environment.fingerprint)] : []
   if (options.tritonVersion) initialVersions.push(savedVersion('t1', 'Triton baseline', 0.9, environment.fingerprint, 'triton_python'))
+  if (options.torchVersions) {
+    initialVersions.push(savedVersion('p1', 'PyTorch baseline', 1, environment.fingerprint, 'torch_python'))
+    initialVersions.push(savedVersion('p2', 'PyTorch vectorized', 0.82, environment.fingerprint, 'torch_python'))
+  }
   const state: MockApiState = {
     versions: initialVersions,
     submittedJobs: [],
@@ -191,12 +231,18 @@ export async function installMockApi(page: Page, options: { versions?: boolean; 
       const id = path.split('/').at(-1) ?? ''
       const body = jobs.get(id) ?? {}
       const base = { id, problem_id: 'vector-addition', language: body.language, action: body.action, progress: 1 }
-      if (body.action === 'compile') return fulfill({ ...base, status: 'failed', phase: 'compiling', error: { code: 'compile_error', message: body.language === 'triton_python' ? 'Triton 编译检查失败' : 'NVCC 编译失败' }, diagnostics: body.language === 'triton_python' ? 'solution.py:7: SyntaxError' : 'solution.cu:7: error: expected a semicolon' })
+      if (body.action === 'compile') {
+        const language = body.language as MockLanguage
+        const message = language === 'triton_python' ? 'Triton 编译检查失败' : language === 'torch_python' ? 'PyTorch 代码检查失败' : 'NVCC 编译失败'
+        const diagnostics = language === 'cuda_cpp' ? 'solution.cu:7: error: expected a semicolon' : 'solution.py:7: SyntaxError'
+        return fulfill({ ...base, status: 'failed', phase: 'compiling', error: { code: 'compile_error', message }, diagnostics })
+      }
       if (body.action === 'run') return fulfill({ ...base, status: 'timed_out', phase: 'public', error: { code: 'timeout', message: '公开样例运行超过限制' } })
       if (body.action === 'validate') return fulfill({ ...base, status: 'failed', phase: 'full', error: { code: 'wrong_answer', message: '结果与参考实现不一致', details: { correctness: { cases: [{ name: '公开样例 1', passed: false, message: '第 17 个元素不匹配', error_type: 'wrong_answer' }] } } } })
       if (body.action === 'save_version') {
         if (!state.versions.some((item) => item.id === 'saved-v3')) {
-          const created = savedVersion('saved-v3', String(body.version_name), 0.8, environment.fingerprint, body.language === 'triton_python' ? 'triton_python' : 'cuda_cpp')
+          const language: MockLanguage = body.language === 'triton_python' || body.language === 'torch_python' ? body.language : 'cuda_cpp'
+          const created = savedVersion('saved-v3', String(body.version_name), 0.8, environment.fingerprint, language)
           created.source_code = String(body.source)
           state.versions.push(created)
         }

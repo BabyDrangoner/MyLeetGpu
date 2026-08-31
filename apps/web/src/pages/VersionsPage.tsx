@@ -7,17 +7,15 @@ import { JobPanel } from '../components/JobPanel'
 import { Modal } from '../components/Modal'
 import { RetryButton, StatusView } from '../components/StatusView'
 import { useToast } from '../components/Toast'
-import type { ComparisonResult, Job, KernelLanguage, SavedVersion } from '../domain/types'
+import type { ComparisonResult, EnvironmentSnapshot, Job, KernelLanguage, SavedVersion } from '../domain/types'
 import { useAsync } from '../hooks/useAsync'
 import { useJob } from '../hooks/useJob'
 import { comparisonMetric, latestBenchmarkRun, localComparability } from '../lib/benchmark'
 import { formatDate, formatMetric, formatPercent } from '../lib/format'
+import { implementationLanguages, isKernelLanguage, languageLabel } from '../lib/languages'
 
 const MAX_SELECTED_VERSIONS = 8
-const kernelLanguages: KernelLanguage[] = ['cuda_cpp', 'triton_python']
 const EMPTY_VERSIONS: SavedVersion[] = []
-const isKernelLanguage = (value: string | null): value is KernelLanguage => value === 'cuda_cpp' || value === 'triton_python'
-const languageLabel = (language: KernelLanguage) => language === 'triton_python' ? 'Triton (Python)' : 'CUDA C++'
 
 function latestRun(version: SavedVersion) {
   return latestBenchmarkRun(version)
@@ -25,6 +23,16 @@ function latestRun(version: SavedVersion) {
 
 function shortHash(hash?: string) {
   return hash ? hash.slice(0, 10) : '—'
+}
+
+function toolchainLabel(language: KernelLanguage, environment?: EnvironmentSnapshot): string {
+  if (language === 'cuda_cpp') {
+    return `CUDA ${environment?.cuda_runtime_version ?? environment?.cuda_version ?? '—'} / NVCC ${environment?.nvcc_version ?? '—'}`
+  }
+  if (language === 'triton_python') {
+    return `Triton ${String(environment?.triton_version ?? '—')} / PyTorch ${String(environment?.torch_version ?? '—')} / Python ${String(environment?.python_version ?? '—')}`
+  }
+  return `PyTorch ${String(environment?.torch_version ?? '—')} / Python ${String(environment?.python_version ?? '—')} / Torch CUDA ${String(environment?.torch_cuda_version ?? environment?.cuda_runtime_version ?? environment?.cuda_version ?? '—')}`
 }
 
 export function VersionsPage() {
@@ -51,7 +59,7 @@ export function VersionsPage() {
 
   const versions = versionsState.data ?? EMPTY_VERSIONS
   const supportedLanguages = useMemo(
-    () => kernelLanguages.filter((language) => problem.data?.implementations[language]),
+    () => implementationLanguages.filter((language) => problem.data?.implementations[language]),
     [problem.data],
   )
   const requestedLanguage = searchParams.get('language')
@@ -348,7 +356,7 @@ export function VersionsPage() {
                     const flags = run?.compiler_flags ?? run?.compile_flags ?? version.compile_flags
                     const flagsText = Array.isArray(flags) ? flags.join(' ') : flags
                     const imageDigest = env?.container_digest ?? env?.image_digest
-                    return <div key={version.id}><strong>{version.name}</strong><dl><div><dt>实现语言</dt><dd>{languageLabel(version.language)}</dd></div><div><dt>题目修订</dt><dd>{version.problem_revision}</dd></div><div><dt>Suite</dt><dd><code>{shortHash(run?.suite_hash)}</code></dd></div><div><dt>协议版本</dt><dd>{run?.protocol_version ?? 'unavailable'}</dd></div><div><dt>执行配置</dt><dd title={flagsText}><code>{flagsText || 'unavailable'}</code></dd></div><div><dt>GPU</dt><dd>{env?.gpu_name ?? env?.gpu ?? 'unavailable'}</dd></div><div><dt>驱动</dt><dd>{env?.driver_version ?? 'unavailable'}</dd></div><div><dt>工具链</dt><dd>{version.language === 'triton_python' ? `Triton ${String(env?.triton_version ?? '—')} / PyTorch ${String(env?.torch_version ?? '—')} / Python ${String(env?.python_version ?? '—')}` : `CUDA ${env?.cuda_runtime_version ?? env?.cuda_version ?? '—'} / NVCC ${env?.nvcc_version ?? '—'}`}</dd></div><div><dt>镜像摘要</dt><dd title={imageDigest}><code>{shortHash(imageDigest)}</code></dd></div><div><dt>环境指纹</dt><dd><code>{shortHash(run?.environment_fingerprint ?? env?.fingerprint)}</code></dd></div><div><dt>预热 / 样本</dt><dd>{run?.warmup ?? '—'} / {run?.iterations ?? '—'}</dd></div></dl></div>
+                    return <div key={version.id}><strong>{version.name}</strong><dl><div><dt>实现语言</dt><dd>{languageLabel(version.language)}</dd></div><div><dt>题目修订</dt><dd>{version.problem_revision}</dd></div><div><dt>Suite</dt><dd><code>{shortHash(run?.suite_hash)}</code></dd></div><div><dt>协议版本</dt><dd>{run?.protocol_version ?? 'unavailable'}</dd></div><div><dt>执行配置</dt><dd title={flagsText}><code>{flagsText || 'unavailable'}</code></dd></div><div><dt>GPU</dt><dd>{env?.gpu_name ?? env?.gpu ?? 'unavailable'}</dd></div><div><dt>驱动</dt><dd>{env?.driver_version ?? 'unavailable'}</dd></div><div><dt>工具链</dt><dd>{toolchainLabel(version.language, env)}</dd></div><div><dt>镜像摘要</dt><dd title={imageDigest}><code>{shortHash(imageDigest)}</code></dd></div><div><dt>环境指纹</dt><dd><code>{shortHash(run?.environment_fingerprint ?? env?.fingerprint)}</code></dd></div><div><dt>预热 / 样本</dt><dd>{run?.warmup ?? '—'} / {run?.iterations ?? '—'}</dd></div></dl></div>
                   })}
                 </div>
               </section>

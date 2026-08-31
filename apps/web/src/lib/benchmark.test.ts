@@ -43,7 +43,7 @@ describe('benchmark comparability', () => {
     expect(result.reasons).toEqual(expect.arrayContaining([
       '题目修订版本不一致',
       '测试套件不一致',
-      '编译配置不一致',
+      '执行配置不一致',
       '运行环境指纹不一致',
       '输入规模不一致',
     ]))
@@ -55,6 +55,13 @@ describe('benchmark comparability', () => {
       comparable: false,
       reasons: ['实现语言不一致'],
     })
+  })
+
+  it('compares PyTorch versions only within the PyTorch implementation language', () => {
+    const first = version('torch-a', { language: 'torch_python' })
+    const second = version('torch-b', { language: 'torch_python' })
+    expect(localComparability([first, second])).toEqual({ comparable: true, reasons: [] })
+    expect(localComparability([first, version('triton', { language: 'triton_python' })]).reasons).toContain('实现语言不一致')
   })
 
   it('reads both supported comparison row shapes', () => {

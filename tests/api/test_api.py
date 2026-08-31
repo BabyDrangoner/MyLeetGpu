@@ -47,7 +47,7 @@ def test_readiness_distinguishes_database_from_unprobed_runner(api) -> None:
     assert unavailable.json() == {
         "status": "not_ready",
         "database": True,
-        "problems": 3,
+        "problems": 5,
         "runner": "unavailable",
         "worker_active": False,
         "runner_error": "worker has not probed the GPU yet",
@@ -61,19 +61,27 @@ def test_readiness_distinguishes_database_from_unprobed_runner(api) -> None:
     assert ready.json()["runner"] == "healthy"
 
 
-def test_problem_list_and_detail_expose_three_public_manifests_only(api) -> None:
+def test_problem_list_and_detail_expose_all_public_manifests_only(api) -> None:
     client, _ = api
 
     listing = client.get("/api/problems")
     detail = client.get("/api/problems/reduction")
 
     assert listing.status_code == 200
-    assert listing.json()["total"] == 3
-    assert {item["slug"] for item in listing.json()["items"]} == {
+    assert listing.json()["total"] == 5
+    listed_by_slug = {item["slug"]: item for item in listing.json()["items"]}
+    assert set(listed_by_slug) == {
+        "grouped-query-attention",
+        "multi-head-attention",
         "vector-addition",
         "matrix-transpose",
         "reduction",
     }
+    assert listed_by_slug["multi-head-attention"]["languages"] == ["torch_python"]
+    assert listed_by_slug["vector-addition"]["languages"] == [
+        "cuda_cpp",
+        "triton_python",
+    ]
     assert detail.status_code == 200
     payload = detail.json()
     serialized = detail.text
@@ -88,6 +96,12 @@ def test_problem_list_and_detail_expose_three_public_manifests_only(api) -> None
     assert "suite_seed" not in serialized
     assert "signed_random" not in serialized
     assert "harness/validator.cu" not in serialized
+
+    torch_detail = client.get("/api/problems/multi-head-attention").json()
+    assert torch_detail["default_language"] == "torch_python"
+    assert torch_detail["supported_languages"] == ["torch_python"]
+    assert set(torch_detail["implementations"]) == {"torch_python"}
+    assert torch_detail["implementations"]["torch_python"]["editor_language"] == "python"
 
 
 def test_unknown_problem_is_404(api) -> None:
@@ -145,6 +159,55 @@ def test_cuda_and_triton_drafts_are_independent_api_resources(api) -> None:
         == "triton draft"
     )
     assert app.state.repository.counts()["drafts"] == 2
+
+
+def test_torch_only_problem_defaults_drafts_jobs_and_duplicates_to_torch(api) -> None:
+    client, app = api
+    source = "import torch\ndef solve(query, key, value, attention_mask):\n    return query\n"
+
+    saved = client.put(
+        "/api/drafts/multi-head-attention",
+        json={"source": source},
+    )
+    fetched = client.get("/api/drafts/multi-head-attention")
+    submitted = client.post(
+        "/api/jobs",
+        json={
+            "problem_id": "multi-head-attention",
+            "action": "validate",
+            "source": source,
+        },
+    )
+    version = create_saved_version(
+        app.state.repository,
+        problem_id="multi-head-attention",
+        language="torch_python",
+        source=source,
+        source_digest=source_hash(source),
+        compile_flags=("backend=torch_python", "policy=restricted_torch_v1"),
+    )
+    duplicate = client.get(
+        "/api/versions/duplicates",
+        params={"problem_id": "multi-head-attention", "source_hash": source_hash(source)},
+    )
+
+    assert saved.status_code == 200
+    assert saved.json()["language"] == "torch_python"
+    assert fetched.status_code == 200
+    assert fetched.json()["language"] == "torch_python"
+    assert submitted.status_code == 202
+    assert submitted.json()["language"] == "torch_python"
+    job = app.state.repository.get_job(submitted.json()["id"])
+    assert job is not None and job.language == "torch_python"
+    assert Path(job.spool_path, "source.py").is_file()
+    assert duplicate.status_code == 200
+    assert duplicate.json()["items"][0]["id"] == version.id
+
+    unsupported = client.put(
+        "/api/drafts/multi-head-attention",
+        json={"language": "cuda_cpp", "source": SOURCE},
+    )
+    assert unsupported.status_code == 404
 
 
 def test_triton_job_language_is_persisted_and_returned(api) -> None:
@@ -311,6 +374,18 @@ def test_environment_endpoint_is_honest_about_unavailable_telemetry(api) -> None
     assert payload["compute_capability"] == "8.9"
     assert payload["cuda_arch"] == "89"
     assert set(payload["telemetry"].values()) == {None}
+
+    app.state.repository.save_environment(
+        make_probe("torch-environment-api", backend="torch_python")
+    )
+    torch_environment = client.get("/api/environment", params={"language": "torch_python"}).json()
+    assert torch_environment["status"] == "healthy"
+    assert torch_environment["backend"] == "torch_python"
+    assert torch_environment["toolchain"] == {
+        "python_version": "3.11.10",
+        "torch_version": "2.5.1",
+        "torch_cuda_version": "12.4",
+    }
 
 
 def test_version_list_duplicate_lookup_and_metadata_update(api) -> None:

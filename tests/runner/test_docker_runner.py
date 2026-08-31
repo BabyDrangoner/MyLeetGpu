@@ -14,11 +14,14 @@ from myleetgpu.runner.docker import (
     CONTAINER_FILE_BYTES,
     CONTAINER_USER,
     CUDA_TMPFS,
+    PYTHON_TMPFS,
     RESULT_PREFIX,
     RUNNER_LABEL,
+    TORCH_POLICY_SOURCE_FILENAME,
+    TORCH_PYTHON,
+    TORCH_TMPFS,
     TRITON_POLICY_FILENAME,
     TRITON_PYTHON,
-    TRITON_TMPFS,
     DockerRunner,
     _safe_name,
 )
@@ -58,6 +61,16 @@ def vector_problem() -> Problem:
 @pytest.fixture(scope="module")
 def triton_implementation(vector_problem: Problem):
     return vector_problem.get_implementation(TRITON_PYTHON)
+
+
+@pytest.fixture(scope="module")
+def torch_problem() -> Problem:
+    return ProblemCatalog(PROJECT_ROOT / "problems").load().get("multi-head-attention")
+
+
+@pytest.fixture(scope="module")
+def torch_implementation(torch_problem: Problem):
+    return torch_problem.get_implementation(TORCH_PYTHON)
 
 
 def healthy_probe(settings: Settings) -> EnvironmentProbe:
@@ -168,20 +181,22 @@ def test_windows_host_mount_path_is_not_resolved_as_a_posix_relative_path(
     )
 
 
+@pytest.mark.parametrize("language", [TRITON_PYTHON, TORCH_PYTHON])
 @pytest.mark.parametrize("gpu", [False, True])
-def test_triton_container_arguments_keep_sandbox_and_use_private_executable_cache(
+def test_python_container_arguments_keep_backend_specific_sandbox(
     runner: DockerRunner,
     settings: Settings,
+    language: str,
     gpu: bool,
 ) -> None:
-    task_dir = settings.jobs_dir / "job-triton-sandbox" / ("run" if gpu else "compile")
+    task_dir = settings.jobs_dir / f"job-{language}-sandbox" / ("run" if gpu else "compile")
     task_dir.mkdir(parents=True)
 
     args = runner._base_container_args(
-        "triton-safe",
+        "python-safe",
         task_dir,
         gpu=gpu,
-        language=TRITON_PYTHON,
+        language=language,
         read_only_workdir=True,
     )
 
@@ -195,15 +210,19 @@ def test_triton_container_arguments_keep_sandbox_and_use_private_executable_cach
     assert option_value(args, "--memory") == settings.container_memory
     assert option_value(args, "--memory-swap") == settings.container_memory
     assert option_value(args, "--cpus") == str(settings.container_cpus)
-    assert option_value(args, "--tmpfs") == TRITON_TMPFS
-    assert "noexec" not in option_value(args, "--tmpfs")
-    assert "exec" in option_value(args, "--tmpfs")
+    expected_tmpfs = TORCH_TMPFS if language == TORCH_PYTHON else PYTHON_TMPFS
+    assert option_value(args, "--tmpfs") == expected_tmpfs
+    if language == TORCH_PYTHON:
+        assert "noexec" in expected_tmpfs
+    else:
+        assert "noexec" not in expected_tmpfs
+        assert "exec" in expected_tmpfs
     assert option_value(args, "--mount").endswith("dst=/work,readonly")
     assert ("--gpus" in args) is gpu
     if gpu:
         assert option_value(args, "--gpus") == "device=0"
     environments = [args[index + 1] for index, value in enumerate(args) if value == "--env"]
-    assert environments == [
+    expected_environments = [
         "HOME=/tmp",
         "CUDA_VISIBLE_DEVICES=0",
         "PYTHONHASHSEED=0",
@@ -215,6 +234,9 @@ def test_triton_container_arguments_keep_sandbox_and_use_private_executable_cach
         "PYTHONPYCACHEPREFIX=/tmp/pycache",
         "TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor",
     ]
+    if language == TORCH_PYTHON:
+        expected_environments.extend(["CUBLAS_WORKSPACE_CONFIG=:4096:8", "NVIDIA_TF32_OVERRIDE=0"])
+    assert environments == expected_environments
     assert "CUDA_CACHE_DISABLE=1" not in environments
     assert "/var/run/docker.sock" not in " ".join(args)
 
@@ -398,6 +420,45 @@ def test_prepare_triton_compile_copies_source_platform_and_policy(
         assert stat.S_IMODE((compile_dir / filename).stat().st_mode) & stat.S_IWOTH == 0
 
 
+def test_prepare_torch_compile_selects_the_independent_restricted_policy(
+    runner: DockerRunner,
+    settings: Settings,
+    torch_problem: Problem,
+    torch_implementation,
+) -> None:
+    task_root = settings.jobs_dir / "job-torch-prepare"
+    task_root.mkdir()
+    source_path = task_root / "snapshot.py"
+    source_path.write_text(torch_implementation.starter_code, encoding="utf-8")
+
+    compile_dir = runner.prepare_compile(
+        task_root,
+        torch_problem,
+        source_path,
+        "validator",
+        language=TORCH_PYTHON,
+        implementation=torch_implementation,
+    )
+
+    assert {path.name for path in compile_dir.iterdir()} == {
+        "source.py",
+        "platform.py",
+        TRITON_POLICY_FILENAME,
+    }
+    assert (compile_dir / "source.py").read_text(encoding="utf-8") == (
+        torch_implementation.starter_code
+    )
+    assert (compile_dir / "platform.py").read_bytes() == (
+        torch_implementation.validator_path.read_bytes()
+    )
+    assert (compile_dir / TRITON_POLICY_FILENAME).read_bytes() == (
+        PROJECT_ROOT / "backend/myleetgpu/runner" / TORCH_POLICY_SOURCE_FILENAME
+    ).read_bytes()
+    assert (compile_dir / TRITON_POLICY_FILENAME).read_bytes() != (
+        PROJECT_ROOT / "backend/myleetgpu/runner/submission_policy.py"
+    ).read_bytes()
+
+
 def test_triton_compile_uses_no_gpu_readonly_source_and_pinned_image(
     runner: DockerRunner,
     settings: Settings,
@@ -456,6 +517,67 @@ def test_triton_compile_uses_no_gpu_readonly_source_and_pinned_image(
         "/work/source.py",
     ]
     assert captured["timeout"] == 30.0
+    assert captured["platform_owned"] is False
+
+
+def test_torch_compile_uses_no_gpu_readonly_source_and_shared_pinned_image(
+    runner: DockerRunner,
+    settings: Settings,
+    torch_problem: Problem,
+    torch_implementation,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_root = settings.jobs_dir / "job-torch-compile"
+    task_root.mkdir()
+    source_path = task_root / "snapshot.py"
+    source_path.write_text(torch_implementation.starter_code, encoding="utf-8")
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(runner, "_inspect_image_digest", lambda image: image)
+
+    def fake_run(
+        args: Sequence[str],
+        name: str,
+        *,
+        timeout: float,
+        limit: int | None = None,
+        platform_owned: bool = False,
+    ) -> CommandResult:
+        captured.update(
+            args=list(args),
+            name=name,
+            timeout=timeout,
+            limit=limit,
+            platform_owned=platform_owned,
+        )
+        return CommandResult(tuple(args), 0, "", 0.1)
+
+    monkeypatch.setattr(runner, "_run_container", fake_run)
+
+    result = runner.compile(
+        task_root,
+        torch_problem,
+        source_path,
+        harness_kind="validator",
+        language=TORCH_PYTHON,
+        implementation=torch_implementation,
+    )
+    args = captured["args"]
+
+    assert result.succeeded
+    assert result.executable == task_root / "compile-validator" / "source.py"
+    assert isinstance(args, list)
+    assert "--gpus" not in args
+    assert option_value(args, "--mount").endswith("dst=/work,readonly")
+    assert args[-7:] == [
+        "--entrypoint",
+        "python",
+        settings.triton_image,
+        "-I",
+        "-B",
+        f"/work/{TRITON_POLICY_FILENAME}",
+        "/work/source.py",
+    ]
+    assert captured["timeout"] == torch_problem.manifest.timeouts.compile_ms / 1000
     assert captured["platform_owned"] is False
 
 
@@ -533,14 +655,16 @@ def test_execute_uses_gpu_and_parses_only_platform_result(
     assert not task_root.exists()
 
 
+@pytest.mark.parametrize("language", [TRITON_PYTHON, TORCH_PYTHON])
 @pytest.mark.parametrize("mode", ["public", "full", "benchmark"])
-def test_execute_triton_uses_gpu_pinned_image_and_readonly_exact_inputs(
+def test_execute_python_uses_gpu_pinned_image_and_readonly_exact_inputs(
     runner: DockerRunner,
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
+    language: str,
     mode: str,
 ) -> None:
-    task_root = settings.jobs_dir / f"job-triton-run-{mode}"
+    task_root = settings.jobs_dir / f"job-{language}-run-{mode}"
     compile_dir = task_root / "compile-validator"
     compile_dir.mkdir(parents=True)
     source = compile_dir / "source.py"
@@ -570,7 +694,7 @@ def test_execute_triton_uses_gpu_pinned_image_and_readonly_exact_inputs(
         source,
         mode=mode,
         timeout_seconds=13.5,
-        language=TRITON_PYTHON,
+        language=language,
     )
     args = captured["args"]
 
@@ -579,7 +703,9 @@ def test_execute_triton_uses_gpu_pinned_image_and_readonly_exact_inputs(
     assert isinstance(args, list)
     assert option_value(args, "--gpus") == "device=0"
     assert option_value(args, "--mount").endswith("dst=/work,readonly")
-    assert option_value(args, "--tmpfs") == TRITON_TMPFS
+    assert option_value(args, "--tmpfs") == (
+        TORCH_TMPFS if language == TORCH_PYTHON else PYTHON_TMPFS
+    )
     assert args[-8:] == [
         "--entrypoint",
         "python",
@@ -603,7 +729,7 @@ def test_execute_triton_uses_gpu_pinned_image_and_readonly_exact_inputs(
     assert stat.S_IMODE((run_dir / TRITON_POLICY_FILENAME).stat().st_mode) == 0o444
 
 
-def test_execute_infers_triton_language_from_python_artifact(
+def test_execute_requires_explicit_language_for_ambiguous_python_artifact(
     runner: DockerRunner,
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
@@ -615,26 +741,30 @@ def test_execute_infers_triton_language_from_python_artifact(
     source.write_text("pass\n", encoding="utf-8")
     (compile_dir / "platform.py").write_text("pass\n", encoding="utf-8")
     (compile_dir / TRITON_POLICY_FILENAME).write_text("pass\n", encoding="utf-8")
-    captured: dict[str, list[str]] = {}
+    invoked = False
 
     def fake_run(args, name, *, timeout, limit=None, platform_owned=False):
-        captured["args"] = list(args)
-        return CommandResult(tuple(args), 0, RESULT_PREFIX + '{"status":"passed"}', 0.1)
+        nonlocal invoked
+        invoked = True
+        raise AssertionError("ambiguous Python artifact must not start a container")
 
     monkeypatch.setattr(runner, "_run_container", fake_run)
 
-    result = runner.execute(task_root, source, mode="public", timeout_seconds=1)
+    with pytest.raises(ValueError, match="Python artifact language is ambiguous"):
+        runner.execute(task_root, source, mode="public", timeout_seconds=1)
 
-    assert result.succeeded
-    assert settings.triton_image in captured["args"]
+    assert invoked is False
+    assert not (task_root / "run-public").exists()
 
 
-def test_execute_triton_rejects_artifact_without_submission_policy_before_container_start(
+@pytest.mark.parametrize("language", [TRITON_PYTHON, TORCH_PYTHON])
+def test_execute_python_rejects_artifact_without_submission_policy_before_container_start(
     runner: DockerRunner,
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
+    language: str,
 ) -> None:
-    task_root = settings.jobs_dir / "job-triton-missing-policy"
+    task_root = settings.jobs_dir / f"job-{language}-missing-policy"
     compile_dir = task_root / "compile-validator"
     compile_dir.mkdir(parents=True)
     source = compile_dir / "source.py"
@@ -649,13 +779,13 @@ def test_execute_triton_rejects_artifact_without_submission_policy_before_contai
 
     monkeypatch.setattr(runner, "_run_container", fake_run)
 
-    with pytest.raises(ValueError, match="missing submission policy"):
+    with pytest.raises(ValueError, match="compiled Python artifact is missing submission policy"):
         runner.execute(
             task_root,
             source,
             mode="public",
             timeout_seconds=1,
-            language=TRITON_PYTHON,
+            language=language,
         )
 
     assert invoked is False
@@ -1073,6 +1203,83 @@ def test_triton_probe_records_exact_toolchain_and_uses_optional_image_without_gl
     assert not runner._health_file.exists()
 
 
+def test_torch_probe_records_independent_backend_without_requiring_triton(
+    runner: DockerRunner,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[tuple[str, ...], str | None, bool]] = []
+
+    def fake_limited(args: Sequence[str], *, timeout: float, limit: int) -> CommandResult:
+        if "version" in args:
+            return CommandResult(tuple(args), 0, "29.0.0\n", 0.01)
+        assert "inspect" in args
+        return CommandResult(
+            tuple(args),
+            0,
+            json.dumps(["pytorch/pytorch@sha256:" + "b" * 64]),
+            0.01,
+        )
+
+    def fake_probe(
+        command: Sequence[str],
+        *,
+        gpu: bool,
+        timeout: float,
+        image: str | None = None,
+        platform_owned: bool = True,
+    ) -> CommandResult:
+        calls.append((tuple(command), image, platform_owned))
+        if command[0] == "nvidia-smi":
+            return CommandResult(
+                tuple(command),
+                0,
+                "NVIDIA GeForce RTX 4060, 566.26, 8.9\n",
+                0.01,
+            )
+        assert "triton" not in " ".join(command)
+        payload = {
+            "python_version": "3.11.11",
+            "torch_version": "2.5.1+cu124",
+            "torch_cuda_version": "12.4",
+            "cuda_available": True,
+            "cuda_device_count": 1,
+        }
+        return CommandResult(tuple(command), 0, json.dumps(payload), 0.01)
+
+    monkeypatch.setattr(runner, "_run_limited", fake_limited)
+    monkeypatch.setattr(runner, "_docker_probe", fake_probe)
+    monkeypatch.setattr(
+        runner,
+        "_probe_telemetry",
+        lambda *, image=None, platform_owned=True: {
+            "temperature_c": None,
+            "power_w": None,
+            "sm_clock_mhz": None,
+            "gpu_busy_percent": None,
+        },
+    )
+
+    probe = runner.probe_torch_environment(force=True)
+
+    assert probe.healthy
+    assert probe.backend == TORCH_PYTHON
+    assert probe.cuda_image == settings.triton_image
+    assert probe.image_digest == "pytorch/pytorch@sha256:" + "b" * 64
+    assert probe.cuda_runtime_version == "12.4"
+    assert probe.nvcc_version is None
+    assert probe.cuda_arch == "89"
+    assert probe.toolchain == {
+        "python_version": "3.11.11",
+        "torch_cuda_version": "12.4",
+        "torch_version": "2.5.1+cu124",
+    }
+    assert len(probe.fingerprint) == 64
+    assert all(image == settings.triton_image for _, image, _ in calls)
+    assert all(platform_owned is False for _, _, platform_owned in calls)
+    assert not runner._health_file.exists()
+
+
 def test_missing_triton_image_is_backend_local_and_does_not_trip_cuda_circuit(
     runner: DockerRunner,
     settings: Settings,
@@ -1090,7 +1297,27 @@ def test_missing_triton_image_is_backend_local_and_does_not_trip_cuda_circuit(
     assert not probe.healthy
     assert probe.backend == TRITON_PYTHON
     assert probe.cuda_image == settings.triton_image
-    assert "fixed Triton image is unavailable" in (probe.error or "")
+    assert "fixed PyTorch/Triton image is unavailable" in (probe.error or "")
+    assert not runner._health_file.exists()
+    runner.assert_healthy()
+
+
+def test_missing_shared_python_image_is_local_to_torch_backend(
+    runner: DockerRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_limited(args: Sequence[str], *, timeout: float, limit: int) -> CommandResult:
+        if "version" in args:
+            return CommandResult(tuple(args), 0, "29.0.0\n", 0.01)
+        return CommandResult(tuple(args), 1, "Error: No such image", 0.01)
+
+    monkeypatch.setattr(runner, "_run_limited", fake_limited)
+
+    probe = runner.probe_torch_environment(force=True)
+
+    assert not probe.healthy
+    assert probe.backend == TORCH_PYTHON
+    assert "fixed PyTorch/Triton image is unavailable" in (probe.error or "")
     assert not runner._health_file.exists()
     runner.assert_healthy()
 
@@ -1134,6 +1361,49 @@ def test_triton_build_config_records_language_toolchain_and_architecture(
         "triton=3.1.0",
         "torch_cuda=12.4",
         "arch=sm_89",
+    ]
+
+
+def test_torch_build_config_records_policy_toolchain_and_architecture(
+    torch_problem: Problem,
+    settings: Settings,
+    torch_implementation,
+) -> None:
+    probe = EnvironmentProbe(
+        healthy=True,
+        gpu_name="NVIDIA GeForce RTX 4060",
+        compute_capability="8.9",
+        driver_version="566.26",
+        cuda_runtime_version="12.4",
+        nvcc_version=None,
+        cuda_image=settings.triton_image,
+        image_digest="sha256:" + "b" * 64,
+        cuda_arch="89",
+        backend=TORCH_PYTHON,
+        toolchain={
+            "python_version": "3.11.11",
+            "torch_version": "2.5.1+cu124",
+            "torch_cuda_version": "12.4",
+        },
+    )
+
+    flags = DockerRunner.effective_compile_flags(
+        torch_problem,
+        probe,
+        language=TORCH_PYTHON,
+        implementation=torch_implementation,
+    )
+
+    assert flags == [
+        "backend=torch_python",
+        "policy=restricted_torch_v1",
+        "python=3.11.11",
+        "torch=2.5.1+cu124",
+        "torch_cuda=12.4",
+        "arch=sm_89",
+        "float32_matmul_precision=highest",
+        "tf32=false",
+        "deterministic_algorithms=true",
     ]
 
 

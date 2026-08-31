@@ -184,10 +184,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def get_draft(
         problem_id: str,
         request: Request,
-        language: Annotated[KernelLanguage, Query()] = "cuda_cpp",
+        language: Annotated[KernelLanguage | None, Query()] = None,
     ) -> dict[str, Any]:
-        _implementation_or_404(request, problem_id, language)
-        record = _repository(request).get_draft(problem_id, language)
+        implementation = _implementation_or_404(request, problem_id, language)
+        selected_language = implementation.language.value
+        record = _repository(request).get_draft(problem_id, selected_language)
         if record is None:
             raise HTTPException(status_code=404, detail="尚未保存草稿")
         return {
@@ -199,8 +200,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.put("/api/drafts/{problem_id}")
     def put_draft(problem_id: str, body: DraftUpdate, request: Request) -> dict[str, Any]:
-        _implementation_or_404(request, problem_id, body.language)
-        record = _repository(request).upsert_draft(problem_id, body.source, body.language)
+        implementation = _implementation_or_404(request, problem_id, body.language)
+        record = _repository(request).upsert_draft(
+            problem_id, body.source, implementation.language.value
+        )
         return {
             "problem_id": record.problem_id,
             "language": record.language,
@@ -263,15 +266,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def duplicate_versions(
         request: Request,
         problem_id: str = Query(min_length=1, max_length=128),
-        language: Annotated[KernelLanguage, Query()] = "cuda_cpp",
+        language: Annotated[KernelLanguage | None, Query()] = None,
         source_hash_value: str | None = Query(default=None, alias="source_hash", min_length=64),
         source: str | None = Query(default=None, max_length=262_144),
     ) -> dict[str, Any]:
-        _implementation_or_404(request, problem_id, language)
+        implementation = _implementation_or_404(request, problem_id, language)
+        selected_language = implementation.language.value
         digest = source_hash_value or (source_hash(source) if source is not None else None)
         if digest is None:
             raise HTTPException(status_code=422, detail="source_hash 或 source 必填")
-        items = _repository(request).find_duplicate_versions(problem_id, digest, language)
+        items = _repository(request).find_duplicate_versions(problem_id, digest, selected_language)
         return {
             "duplicate": bool(items),
             "items": [
@@ -325,7 +329,7 @@ def _problem_or_404(request: Request, slug: str) -> None:
         raise HTTPException(status_code=404, detail="题目不存在") from error
 
 
-def _implementation_or_404(request: Request, slug: str, language: str) -> Any:
+def _implementation_or_404(request: Request, slug: str, language: str | None) -> Any:
     try:
         problem = request.app.state.catalog.get(slug)
         return problem.get_implementation(language)

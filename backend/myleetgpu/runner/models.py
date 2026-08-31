@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-type RunnerLanguage = Literal["cuda_cpp", "triton_python"]
+type RunnerLanguage = Literal["cuda_cpp", "triton_python", "torch_python"]
 
 
 @dataclass(frozen=True)
