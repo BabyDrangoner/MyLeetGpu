@@ -13,8 +13,11 @@ from typing import Any
 import torch
 
 RESULT_PREFIX = "MYLEETGPU_RESULT="
-ATOL = 2.0e-4
-RTOL = 2.0e-4
+ATOL = 4.0e-4
+RTOL = 4.0e-4
+CLASS_NAME = "MultiHeadAttention"
+INIT_PARAMETERS = ("numHeads", "qWeight", "kWeight", "vWeight", "outputWeight")
+FORWARD_PARAMETERS = ("X", "isCasual")
 
 
 class SubmissionCompileError(RuntimeError):
@@ -24,6 +27,7 @@ class SubmissionCompileError(RuntimeError):
 def is_compilation_error(error: BaseException) -> bool:
     return isinstance(error, SyntaxError | SubmissionCompileError) or type(error).__name__ in {
         "SubmissionPolicyError",
+        "TorchSubmissionPolicyError",
     }
 
 
@@ -39,29 +43,28 @@ def public_error(prefix: str, error: BaseException) -> str:
 class TestCase:
     name: str
     batch: int
-    heads: int
-    query_length: int
-    key_length: int
-    head_dim: int
+    sequence_length: int
+    embed_dim: int
+    num_heads: int
+    is_casual: bool
     seed: int
     pattern: str
-    mask_pattern: str
     internal: bool
 
 
 PUBLIC_CASES = (
-    ("sample_handcrafted", 1, 2, 2, 3, 4, 230901, "sequence", "all"),
-    ("sample_padding_mask", 2, 4, 5, 7, 8, 230901, "random", "prefix"),
-    ("sample_causal_mask", 1, 3, 9, 9, 16, 230901, "random", "causal"),
+    ("sample_noncausal", 1, 3, 8, 2, False, 230901, "sequence"),
+    ("sample_causal", 2, 7, 32, 4, True, 230901, "random"),
+    ("sample_odd_head_dim", 1, 5, 21, 3, False, 230901, "head_markers"),
 )
 INTERNAL_CASES = (
-    ("internal_case_1", 1, 1, 1, 1, 1, 314159, "constant", "all"),
-    ("internal_case_2", 2, 1, 1, 17, 3, 314159, "random", "prefix"),
-    ("internal_case_3", 2, 4, 7, 11, 16, 271828, "random", "single_key"),
-    ("internal_case_4", 1, 7, 33, 33, 24, 271828, "random", "causal"),
-    ("internal_case_5", 1, 4, 5, 6, 8, 1618033, "head_markers", "staggered"),
-    ("internal_case_6", 1, 4, 17, 19, 64, 1618033, "extreme_logits", "staggered"),
-    ("internal_case_7", 2, 8, 65, 97, 32, 314159, "random", "prefix"),
+    ("internal_case_1", 1, 1, 1, 1, True, 314159, "constant"),
+    ("internal_case_2", 2, 1, 12, 3, False, 314159, "random"),
+    ("internal_case_3", 1, 9, 20, 5, True, 271828, "random"),
+    ("internal_case_4", 1, 33, 168, 7, True, 271828, "random"),
+    ("internal_case_5", 2, 6, 48, 6, False, 1618033, "projection_markers"),
+    ("internal_case_6", 1, 17, 256, 4, True, 1618033, "extreme_logits"),
+    ("internal_case_7", 2, 65, 256, 8, False, 314159, "random"),
 )
 
 
@@ -75,146 +78,168 @@ def load_submission() -> ModuleType:
     spec.loader.exec_module(policy)
     return policy.load_submission(
         source_path,
-        expected_parameters=("query", "key", "value", "attention_mask"),
+        expected_class_name=CLASS_NAME,
+        expected_init_parameters=INIT_PARAMETERS,
+        expected_forward_parameters=FORWARD_PARAMETERS,
     )
 
 
-def make_mask(test: TestCase) -> torch.Tensor:
-    shape = (test.batch, 1, test.query_length, test.key_length)
-    if test.mask_pattern == "all":
-        return torch.ones(shape, dtype=torch.bool)
-    if test.mask_pattern == "causal":
-        if test.query_length != test.key_length:
-            raise RuntimeError("causal test configuration must be square")
-        causal = torch.ones((test.query_length, test.key_length), dtype=torch.bool).tril()
-        return (
-            causal.reshape(1, 1, test.query_length, test.key_length)
-            .expand(test.batch, 1, test.query_length, test.key_length)
-            .contiguous()
-        )
-    if test.mask_pattern == "prefix":
-        mask = torch.zeros(shape, dtype=torch.bool)
-        for batch_index in range(test.batch):
-            valid = max(1, test.key_length - ((batch_index * 3 + 1) % test.key_length))
-            mask[batch_index, 0, :, :valid] = True
-        return mask
-    if test.mask_pattern == "single_key":
-        mask = torch.zeros(shape, dtype=torch.bool)
-        for batch_index in range(test.batch):
-            for query_index in range(test.query_length):
-                key_index = (batch_index + query_index * 3) % test.key_length
-                mask[batch_index, 0, query_index, key_index] = True
-        return mask
-    if test.mask_pattern == "staggered":
-        batches = torch.arange(test.batch).reshape(test.batch, 1, 1, 1)
-        queries = torch.arange(test.query_length).reshape(1, 1, test.query_length, 1)
-        keys = torch.arange(test.key_length).reshape(1, 1, 1, test.key_length)
-        mask = ((batches + queries * 5 + keys * 3) % 7) < 4
-        mask[..., 0] = True
-        return mask.contiguous()
-    raise RuntimeError("unknown mask pattern")
+def submission_class(module: ModuleType) -> type:
+    candidate = module.__dict__.get(CLASS_NAME)
+    if not isinstance(candidate, type):
+        raise SubmissionCompileError(f"{CLASS_NAME} must be a class")
+    return candidate
+
+
+def patterned_weight(embed_dim: int, multiplier: int, offset: int) -> torch.Tensor:
+    indexes = torch.arange(embed_dim * embed_dim, dtype=torch.int64).reshape(embed_dim, embed_dim)
+    denominator = 14.0 * math.sqrt(embed_dim)
+    return (((indexes * multiplier + offset) % 29).to(torch.float32) - 14.0) / denominator
 
 
 def make_inputs(
     test: TestCase,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    query_shape = (test.batch, test.heads, test.query_length, test.head_dim)
-    key_shape = (test.batch, test.heads, test.key_length, test.head_dim)
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    shape = (test.batch, test.sequence_length, test.embed_dim)
     generator = torch.Generator(device="cpu").manual_seed(test.seed)
+    weight_scale = 0.8 / math.sqrt(test.embed_dim)
+
     if test.pattern == "constant":
-        query = torch.full(query_shape, 0.25, dtype=torch.float32)
-        key = torch.full(key_shape, -0.5, dtype=torch.float32)
-        value = torch.full(key_shape, 0.375, dtype=torch.float32)
-    elif test.pattern == "sequence":
-        query_indexes = torch.arange(math.prod(query_shape), dtype=torch.int64)
-        key_indexes = torch.arange(math.prod(key_shape), dtype=torch.int64)
-        query = ((query_indexes % 17).to(torch.float32) - 8.0).reshape(query_shape) / 8.0
-        key = (((key_indexes * 3) % 19).to(torch.float32) - 9.0).reshape(key_shape) / 9.0
-        value = (((key_indexes * 5) % 23).to(torch.float32) - 11.0).reshape(key_shape) / 11.0
+        X = torch.full(shape, 0.25, dtype=torch.float32)
+        q_weight = torch.full((test.embed_dim, test.embed_dim), 0.5, dtype=torch.float32)
+        k_weight = torch.full((test.embed_dim, test.embed_dim), -0.75, dtype=torch.float32)
+        v_weight = torch.full((test.embed_dim, test.embed_dim), 0.375, dtype=torch.float32)
+        output_weight = torch.full((test.embed_dim, test.embed_dim), 1.25, dtype=torch.float32)
     else:
-        query = torch.randn(query_shape, generator=generator, dtype=torch.float32) * 0.7
-        key = torch.randn(key_shape, generator=generator, dtype=torch.float32) * 0.7
-        value = torch.randn(key_shape, generator=generator, dtype=torch.float32) * 0.5
-        if test.pattern == "head_markers":
-            offsets = torch.arange(test.heads, dtype=torch.float32).reshape(1, -1, 1, 1)
-            query = query + offsets * 0.07
-            key = key - offsets * 0.11
-            value = value + offsets * 0.25
+        X = torch.randn(shape, generator=generator, dtype=torch.float32) * 0.6
+        q_weight = (
+            torch.randn((test.embed_dim, test.embed_dim), generator=generator, dtype=torch.float32)
+            * weight_scale
+        )
+        k_weight = (
+            torch.randn((test.embed_dim, test.embed_dim), generator=generator, dtype=torch.float32)
+            * weight_scale
+        )
+        v_weight = (
+            torch.randn((test.embed_dim, test.embed_dim), generator=generator, dtype=torch.float32)
+            * weight_scale
+        )
+        output_weight = (
+            torch.randn((test.embed_dim, test.embed_dim), generator=generator, dtype=torch.float32)
+            * weight_scale
+        )
+
+        if test.pattern == "sequence":
+            indexes = torch.arange(math.prod(shape), dtype=torch.int64)
+            X = ((indexes % 23).to(torch.float32) - 11.0).reshape(shape) / 11.0
+        elif test.pattern == "head_markers":
+            channels = torch.arange(test.embed_dim, dtype=torch.float32).reshape(1, 1, -1)
+            positions = torch.arange(test.sequence_length, dtype=torch.float32).reshape(1, -1, 1)
+            X = X + channels * 0.015 + positions * 0.025
+        elif test.pattern == "projection_markers":
+            q_weight = patterned_weight(test.embed_dim, 3, 1)
+            k_weight = patterned_weight(test.embed_dim, 5, 7)
+            v_weight = patterned_weight(test.embed_dim, 11, 2)
+            output_weight = patterned_weight(test.embed_dim, 13, 9)
         elif test.pattern == "extreme_logits":
-            query = query * 32.0
-            key = key * 32.0
+            X = X * 8.0
+            q_weight = q_weight * 2.0
+            k_weight = k_weight * 2.0
         elif test.pattern != "random":
             raise RuntimeError("unknown input pattern")
-    attention_mask = make_mask(test)
-    expected = reference_attention(query, key, value, attention_mask)
-    return query, key, value, attention_mask, expected
+
+    expected = reference_attention(
+        X,
+        test.is_casual,
+        test.num_heads,
+        q_weight,
+        k_weight,
+        v_weight,
+        output_weight,
+    )
+    return X, q_weight, k_weight, v_weight, output_weight, expected
 
 
 def reference_attention(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: torch.Tensor,
+    X: torch.Tensor,
+    is_casual: bool,
+    num_heads: int,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    v_weight: torch.Tensor,
+    output_weight: torch.Tensor,
 ) -> torch.Tensor:
-    query64 = query.to(torch.float64)
-    key64 = key.to(torch.float64)
-    value64 = value.to(torch.float64)
-    scale = query.shape[-1] ** -0.5
-    scores = torch.matmul(query64, key64.transpose(-2, -1)) * scale
-    scores = scores.masked_fill(~attention_mask, float("-inf"))
-    weights = torch.softmax(scores, dim=-1)
-    return torch.matmul(weights, value64).to(torch.float32)
+    batch, sequence_length, embed_dim = X.shape
+    head_dim = embed_dim // num_heads
+    X64 = X.to(torch.float64)
+    query = torch.matmul(X64, q_weight.to(torch.float64))
+    key = torch.matmul(X64, k_weight.to(torch.float64))
+    value = torch.matmul(X64, v_weight.to(torch.float64))
+    query = query.reshape(batch, sequence_length, num_heads, head_dim).transpose(1, 2)
+    key = key.reshape(batch, sequence_length, num_heads, head_dim).transpose(1, 2)
+    value = value.reshape(batch, sequence_length, num_heads, head_dim).transpose(1, 2)
+    scores = torch.matmul(query, key.transpose(-2, -1)) * (head_dim**-0.5)
+    if is_casual:
+        causal_mask = torch.ones((sequence_length, sequence_length), dtype=torch.bool).tril()
+        scores = scores.masked_fill(~causal_mask, float("-inf"))
+    probabilities = torch.softmax(scores, dim=-1)
+    context = torch.matmul(probabilities, value)
+    concatenated = context.transpose(1, 2).contiguous().reshape(batch, sequence_length, embed_dim)
+    return torch.matmul(concatenated, output_weight.to(torch.float64)).to(torch.float32)
 
 
 def validate_output_contract(
     output: object,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: torch.Tensor,
+    tensors: tuple[torch.Tensor, ...],
     expected_shape: tuple[int, ...],
 ) -> torch.Tensor:
+    X = tensors[0]
     if not isinstance(output, torch.Tensor):
-        raise RuntimeError("solve must return a torch.Tensor")
-    if output.device != query.device or output.device.type != "cuda" or output.device.index != 0:
-        raise RuntimeError("solve must return a CUDA tensor on device 0")
+        raise RuntimeError("forward must return a torch.Tensor")
+    if output.device != X.device or output.device.type != "cuda" or output.device.index != 0:
+        raise RuntimeError("forward must return a CUDA tensor on device 0")
     if output.dtype != torch.float32:
-        raise RuntimeError("solve must return torch.float32")
+        raise RuntimeError("forward must return torch.float32")
     if tuple(output.shape) != expected_shape:
-        raise RuntimeError("solve returned an incorrect shape")
-    input_storage_pointers = {
-        tensor.untyped_storage().data_ptr() for tensor in (query, key, value, attention_mask)
-    }
+        raise RuntimeError("forward returned an incorrect shape")
+    input_storage_pointers = {tensor.untyped_storage().data_ptr() for tensor in tensors}
     if output.untyped_storage().data_ptr() in input_storage_pointers:
-        raise RuntimeError("solve output must not alias an input")
+        raise RuntimeError("forward output must not alias X or a weight tensor")
     return output
 
 
 def run_case(module: ModuleType, test: TestCase, stream: torch.cuda.Stream) -> dict[str, Any]:
-    query, key, value, attention_mask, expected = make_inputs(test)
+    X, q_weight, k_weight, v_weight, output_weight, expected = make_inputs(test)
+    attention_type = submission_class(module)
     with torch.inference_mode(), torch.cuda.stream(stream):
-        device_query = query.cuda(non_blocking=False)
-        device_key = key.cuda(non_blocking=False)
-        device_value = value.cuda(non_blocking=False)
-        device_mask = attention_mask.cuda(non_blocking=False)
-        snapshots = tuple(
-            tensor.clone() for tensor in (device_query, device_key, device_value, device_mask)
+        device_tensors = tuple(
+            tensor.cuda(non_blocking=False)
+            for tensor in (X, q_weight, k_weight, v_weight, output_weight)
         )
-        returned = module.solve(device_query, device_key, device_value, device_mask)
-        output = validate_output_contract(
-            returned,
-            device_query,
-            device_key,
-            device_value,
-            device_mask,
-            tuple(expected.shape),
+        snapshots = tuple(tensor.clone() for tensor in device_tensors)
+        device_X, device_q, device_k, device_v, device_output = device_tensors
+        instance = attention_type(
+            test.num_heads,
+            device_q,
+            device_k,
+            device_v,
+            device_output,
         )
+        returned = instance.forward(device_X, test.is_casual)
+        output = validate_output_contract(returned, device_tensors, tuple(expected.shape))
     stream.synchronize()
-    for current, snapshot in zip(
-        (device_query, device_key, device_value, device_mask), snapshots, strict=True
-    ):
+
+    for current, snapshot in zip(device_tensors, snapshots, strict=True):
         if not torch.equal(current, snapshot):
-            raise RuntimeError("solve must not modify its inputs")
+            raise RuntimeError("forward and constructor must not modify X or weight tensors")
+
     actual = output.detach().cpu()
     if not bool(torch.all(torch.isfinite(actual))):
         return {"name": test.name, "passed": False, "message": "output contains non-finite values"}
@@ -223,9 +248,11 @@ def run_case(module: ModuleType, test: TestCase, stream: torch.cuda.Stream) -> d
         return {"name": test.name, "passed": True}
     message = "output mismatch"
     if not test.internal:
-        mismatch = int(torch.nonzero(~close, as_tuple=False)[0].flatten()[0].item())
+        first_index = tuple(
+            int(value) for value in torch.nonzero(~close, as_tuple=False)[0].tolist()
+        )
         max_error = float(torch.max(torch.abs(actual - expected)).item())
-        message = f"output mismatch near dimension index {mismatch}; max abs error {max_error:.6g}"
+        message = f"output mismatch near index {first_index}; max abs error {max_error:.6g}"
     return {"name": test.name, "passed": False, "message": message}
 
 

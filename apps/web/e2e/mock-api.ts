@@ -28,11 +28,46 @@ def solve(a: torch.Tensor, b: torch.Tensor, output: torch.Tensor, n: int) -> Non
 
 export const torchStarterSource = `import torch
 
-def solve(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-    raise NotImplementedError("Implement attention with PyTorch tensor operations")
+class MultiHeadAttention:
+    def __init__(self, numHeads, qWeight, kWeight, vWeight, outputWeight):
+        self.numHeads = numHeads
+        self.qWeight = qWeight
+        self.kWeight = kWeight
+        self.vWeight = vWeight
+        self.outputWeight = outputWeight
+
+    def forward(self, X: torch.Tensor, isCasual: bool) -> torch.Tensor:
+        return torch.matmul(X, self.qWeight)
+`
+
+export const gqaTorchStarterSource = `import torch
+
+class GroupedQueryAttention:
+    def __init__(self, numQueryHeads, numKeyValueHeads, qWeight, kWeight, vWeight, outputWeight):
+        self.numQueryHeads = numQueryHeads
+        self.numKeyValueHeads = numKeyValueHeads
+        self.qWeight = qWeight
+        self.kWeight = kWeight
+        self.vWeight = vWeight
+        self.outputWeight = outputWeight
+
+    def forward(self, X: torch.Tensor, isCasual: bool) -> torch.Tensor:
+        return torch.matmul(X, self.qWeight)
 `
 
 type MockLanguage = 'cuda_cpp' | 'triton_python' | 'torch_python'
+
+const mhaBenchmarkLabels = [
+  'B1-H8-S128-E512',
+  'B2-H12-S384-E768',
+  'B1-H16-S1024-E1024',
+]
+
+const gqaBenchmarkLabels = [
+  'B1-S128-E256-QH8-KVH2-C0',
+  'B2-S384-E512-QH16-KVH4-C1',
+  'B1-S1024-E512-QH32-KVH8-C1',
+]
 
 function sourceForLanguage(language: MockLanguage, id: string) {
   if (language === 'triton_python') return tritonStarterSource
@@ -72,24 +107,29 @@ const problems = [
   { slug: 'max-reduction', title: '单精度向量最大值归约', difficulty: 'medium', revision: '1', summary: '并行求出向量中的最大值。', languages: ['cuda_cpp', 'triton_python'] },
   { slug: 'softmax', title: '逐行 Softmax', difficulty: 'medium', revision: '1', summary: '实现数值稳定的逐行 Softmax。', languages: ['cuda_cpp', 'triton_python'] },
   { slug: 'matrix-multiplication', title: '行主序矩阵乘法', difficulty: 'medium', revision: '1', summary: '实现行主序矩阵乘法。', languages: ['cuda_cpp', 'triton_python'] },
-  { slug: 'multi-head-attention', title: '多头注意力', difficulty: 'medium', revision: '1', summary: '使用 PyTorch 张量操作实现多头注意力。', languages: ['torch_python'] },
-  { slug: 'grouped-query-attention', title: '分组查询注意力', difficulty: 'hard', revision: '1', summary: '使用 PyTorch 实现 GQA 的分组键值共享。', languages: ['torch_python'] },
+  { slug: 'multi-head-attention', title: '多头自注意力', difficulty: 'medium', revision: '2', summary: '实现输入为 X 和 isCasual 的 MHA class。', languages: ['torch_python'] },
+  { slug: 'grouped-query-attention', title: '分组查询自注意力', difficulty: 'hard', revision: '2', summary: '实现输入为 X 和 isCasual 的 GQA class。', languages: ['torch_python'] },
 ]
 
 function problemDetail(slug: string) {
   const summary = problems.find((item) => item.slug === slug) ?? problems[0]
   if (summary.languages.includes('torch_python')) {
+    const isGqa = summary.slug === 'grouped-query-attention'
+    const starter = isGqa ? gqaTorchStarterSource : torchStarterSource
+    const symbol = isGqa ? 'GroupedQueryAttention' : 'MultiHeadAttention'
+    const benchmarkLabels = isGqa ? gqaBenchmarkLabels : mhaBenchmarkLabels
+    const declaration = `class ${symbol}: __init__(...); forward(self, X: torch.Tensor, isCasual: bool) -> torch.Tensor`
     return {
       ...summary,
       default_language: 'torch_python',
       implementations: {
-        torch_python: { language: 'torch_python', display_name: 'PyTorch (Python)', source_suffix: '.py', editor_language: 'python', starter_code: torchStarterSource, signature: { symbol: 'solve', declaration: 'def solve(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor' } },
+        torch_python: { language: 'torch_python', display_name: 'PyTorch (Python)', source_suffix: '.py', editor_language: 'python', starter_code: starter, signature: { symbol, declaration } },
       },
-      statement_markdown: '## 任务\n\n仅使用 PyTorch 张量操作实现注意力函数。',
-      starter_code: torchStarterSource,
-      signature: { symbol: 'solve', declaration: 'def solve(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor' },
+      statement_markdown: '## 任务\n\n实现完整自注意力 class；forward 只接收 X 与 isCasual。',
+      starter_code: starter,
+      signature: { symbol, declaration },
       constraints: { dtype: 'torch.float32', device: 'cuda' },
-      benchmark: { protocol_version: '1', sizes: [{ label: 'small' }, { label: 'medium' }], warmup: 8, iterations: 20 },
+      benchmark: { protocol_version: '2', sizes: benchmarkLabels.map((label) => ({ label })), warmup: 5, iterations: 20 },
     }
   }
   return {
@@ -108,10 +148,14 @@ function problemDetail(slug: string) {
 }
 
 function savedVersion(id: string, name: string, medianScale: number, fingerprint = environment.fingerprint, language: MockLanguage = 'cuda_cpp') {
+  const inputSizes = language === 'torch_python' ? mhaBenchmarkLabels : ['64K', '1M']
+  const baseMedians = language === 'torch_python' ? [0.18, 1.25, 8.4] : [0.08, 0.52]
+  const protocolVersion = language === 'torch_python' ? '2' : '1'
+  const warmup = language === 'torch_python' ? 5 : 8
   return {
     id,
     problem_id: language === 'torch_python' ? 'multi-head-attention' : 'vector-addition',
-    problem_revision: '1',
+    problem_revision: language === 'torch_python' ? '2' : '1',
     language,
     name,
     notes: id === 'v1' ? '直接加载实现' : '使用向量化访存',
@@ -123,17 +167,17 @@ function savedVersion(id: string, name: string, medianScale: number, fingerprint
     benchmark_runs: [{
       id: `run-${id}`,
       suite_hash: 'suite-e2e',
-      protocol_version: '1',
+      protocol_version: protocolVersion,
       compile_flags: executionConfig(language),
-      input_sizes: ['64K', '1M'],
+      input_sizes: inputSizes,
       seed: 424242,
-      warmup: 8,
+      warmup,
       iterations: 20,
       environment: { ...environment, fingerprint },
-      measurements: [
-        { size: '64K', median_ms: 0.08 * medianScale, p95_ms: 0.09 * medianScale, min_ms: 0.075 * medianScale, cv: 0.03, samples_ms: Array(20).fill(0.08 * medianScale) },
-        { size: '1M', median_ms: 0.52 * medianScale, p95_ms: 0.56 * medianScale, min_ms: 0.5 * medianScale, cv: 0.02, samples_ms: Array(20).fill(0.52 * medianScale) },
-      ],
+      measurements: inputSizes.map((size, index) => {
+        const median = baseMedians[index] * medianScale
+        return { size, median_ms: median, p95_ms: median * 1.08, min_ms: median * 0.96, cv: index === 0 ? 0.03 : 0.02, samples_ms: Array(20).fill(median) }
+      }),
       created_at: '2026-08-16T01:00:00Z',
     }],
   }
@@ -190,7 +234,7 @@ export async function installMockApi(page: Page, options: { versions?: boolean; 
       const body = request.postDataJSON() as { version_ids: string[]; baseline_id: string }
       const baseline = state.versions.find((item) => item.id === body.baseline_id) ?? state.versions[0]
       const comparable = options.comparable !== false
-      const rows = ['64K', '1M'].map((size, sizeIndex) => {
+      const rows = baseline.benchmark_runs[0].input_sizes.map((size, sizeIndex) => {
         const baselineMedian = baseline.benchmark_runs[0].measurements[sizeIndex].median_ms
         return {
           size,

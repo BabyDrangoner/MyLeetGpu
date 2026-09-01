@@ -115,10 +115,8 @@ def test_triton_submission_uses_an_isolated_python_snapshot(service_bundle) -> N
 
 def test_torch_only_problem_uses_manifest_default_and_python_snapshot(service_bundle) -> None:
     _, repository, service = service_bundle
-    source = (
-        "import torch\n\n"
-        "def solve(query, key, value, attention_mask):\n"
-        "    return torch.matmul(query, value.transpose(-2, -1))\n"
+    source = (PROJECT_ROOT / "problems/multi-head-attention/torch/starter.py").read_text(
+        encoding="utf-8"
     )
 
     job = service.submit(

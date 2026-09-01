@@ -12,7 +12,7 @@ MyLeetGpu 是供**单机可信操作者**使用的 GPU 编程、正确性验证�
 
 直接运行 FastAPI 时默认监听 `127.0.0.1:8000`。Compose 中 API 为了让 Nginx 访问，会在项目网络内监听 `0.0.0.0:8000`，但**没有向宿主发布 8000**；这不是允许把 API 暴露到外部的例外。
 
-CUDA 每次编译使用无 GPU 的一次性容器和当前 Job 的精确可写编译目录；Triton 与 PyTorch 的 Python 语法及版本化策略预检分别使用 `restricted_triton_v1` 和 `restricted_torch_v1`，同样在无 GPU 容器中执行，但 `/work` 只读。运行/验证/benchmark 使用另一个一次性容器，只读挂载该语言的最小 artifact，并只获得 GPU 0。所有提交容器均无网络、非 root、只读根文件系统、丢弃 capabilities、启用 `no-new-privileges`，并保留 Docker 默认内置 seccomp profile。Triton 因为必须 JIT，只在容器内获得 512 MiB 的临时可执行 `/tmp` 缓存；PyTorch 获得同尺寸但 `noexec` 的临时区，不允许运行时编译。这些缓存均不持久化。
+CUDA 每次编译使用无 GPU 的一次性容器和当前 Job 的精确可写编译目录；Triton 与 PyTorch 的 Python 语法及版本化策略预检分别使用 `restricted_triton_v1` 和 `restricted_torch_v2`，同样在无 GPU 容器中执行，但 `/work` 只读。运行/验证/benchmark 使用另一个一次性容器，只读挂载该语言的最小 artifact，并只获得 GPU 0。所有提交容器均无网络、非 root、只读根文件系统、丢弃 capabilities、启用 `no-new-privileges`，并保留 Docker 默认内置 seccomp profile。Triton 因为必须 JIT，只在容器内获得 512 MiB 的临时可执行 `/tmp` 缓存；PyTorch 获得同尺寸但 `noexec` 的临时区，不允许运行时编译。这些缓存均不持久化。
 
 项目没有 Debug 功能：不提供断点、单步、变量监视、cuda-gdb、Nsight、Profiler 或 PTX/汇编查看。编译/代码检查错误、运行错误、错误答案、超时和受限 stdout/stderr 会正常显示。
 
@@ -221,17 +221,19 @@ make stop
 
 ### 5.1 选择题目与编辑代码
 
-1. 在题目列表选择当前八道内置题之一：Vector Addition、Matrix Transpose、Sum Reduction、Max Reduction、Softmax 和 Matrix Multiplication 分别提供 CUDA C++ 与 Triton (Python) starter；多头缩放点积注意力（MHA）和分组查询注意力（GQA）提供 PyTorch (Python) starter。
+1. 在题目列表选择当前八道内置题之一：Vector Addition、Matrix Transpose、Sum Reduction、Max Reduction、Softmax 和 Matrix Multiplication 分别提供 CUDA C++ 与 Triton (Python) starter；多头自注意力（MHA）和分组查询自注意力（GQA）提供 PyTorch (Python) class starter。
 2. 用编辑器顶部的语言切换器选择当前题目支持的实现。URL 会保留 `language=cuda_cpp`、`language=triton_python` 或 `language=torch_python`，刷新和进入性能页时仍能回到同一语言；语言切换器不会显示当前题目没有声明的实现。
-3. 阅读当前语言的函数签名、补充说明、约束和浮点容差，只实现 starter 要求的 `solve` 接口。CUDA 不要自行提供 `main`；Triton 可以定义多个 `@triton.jit` Kernel，但必须保留可调用的 Python `solve(...)`；PyTorch 只定义题目指定签名的高层 Tensor 函数并返回结果 Tensor。两种 Python 实现都必须遵守题面列出的受限语法。
+3. 阅读当前语言的入口签名、补充说明、约束和浮点容差。CUDA 不要自行提供 `main`；Triton 可以定义多个 `@triton.jit` Kernel，但必须保留可调用的 Python `solve(...)`；PyTorch MHA/GQA 只实现 starter 指定的普通 class 及 `forward(X, isCasual)`。两种 Python 实现都必须遵守题面列出的受限语法。
 4. 在 Monaco Editor 中编辑 `.cu` 或 `.py`。编辑器会分别保存当前题目、当前语言的草稿。
 5. “重置代码”只会把当前语言的编辑内容恢复为该 revision 的 starter；确认前检查是否仍需要未保存修改。
 
 Triton `solve` 接收 GPU 0 上连续存放的 `torch.float32` Tensor 和题目声明的标量参数。平台已经进入受控的 `torch.cuda.stream(stream)` 上下文；直接把 Kernel launch 到当前 stream，写入平台提供的输出 Tensor，并返回 `None`。`solve` 只能做字面量/标量 launch 参数计算、`triton.cdiv`、`triton.next_power_of_2`、当前文件 JIT Kernel launch，以及 Sum Reduction 题明确允许的 `output.zero_()`；不要把 Tensor 移到 CPU、替换输出、调用设备级同步或依赖默认 stream。每道题的 Triton 补充说明会显示准确签名和白名单边界。
 
-PyTorch 的 MHA/GQA 题不要求编写自定义 Kernel，而是练习用 `reshape`/`transpose`、矩阵乘法、mask、softmax 和 GQA 所需的 head 分组等白名单 Tensor 运算组合 attention。`solve(query, key, value, attention_mask)` 接收 GPU 0 上的连续 Tensor，平台已进入受控的 `torch.cuda.stream(stream)` 和 `torch.inference_mode()` 上下文；必须返回新的 CUDA `torch.float32` Tensor，形状符合题面，且不得修改或别名输入。不要把 Tensor 移到 CPU、显式同步、依赖跨调用状态，或直接调用现成的 scaled-dot-product attention 绕过实现。
+PyTorch 的 MHA/GQA 题不要求编写自定义 Kernel，而是练习完整的自注意力前向：平台把固定只读的 Q/K/V/输出投影权重和 head 配置传给构造器，`forward(X, isCasual)` 从同一个 `[batch, sequence, model_dim]` 输入生成 Q/K/V。`isCasual=True` 表示使用包含对角线的下三角 causal mask；GQA 还要求连续 query-head 组共享一个 KV head。平台已进入受控的 `torch.cuda.stream(stream)` 和 `torch.inference_mode()` 上下文；必须返回新的同形 CUDA `torch.float32` Tensor，且不得修改或别名 `X`、权重或实例状态。不要把 Tensor 移到 CPU、显式同步，或直接调用现成的 scaled-dot-product attention 绕过实现。
 
 草稿自动保存只是工作区恢复机制，不是性能版本。页面刷新、切换题目或切换语言后，对应草稿应恢复；网络失败时浏览器保留按语言隔离的本地回退副本。当前服务端草稿按 `(problem_id, language)` upsert，采用后写覆盖，不提供同一题同一语言的多标签页冲突合并。CUDA、Triton 与 PyTorch 草稿不会互相覆盖。
+
+MHA/GQA 从旧的四 Tensor `solve` 升级到 revision 2 class 接口后，已有本地草稿不会自动改写；若编辑器仍显示旧接口，点击“重置代码”载入当前 revision 的 class starter。旧的已保存性能版本会保留，但因 problem revision 不同而标记为不可直接比较。
 
 直接调用 API 时，草稿 GET/PUT、`POST /api/jobs` 和重复源码查询若省略 `language`，都使用题目 manifest 的 `default_language`，而不是一律回退到 CUDA；因此 MHA/GQA 会选中 `torch_python`。`GET /api/environment` 是例外：省略 `language` 时仍默认查询 `cuda_cpp` 环境。
 
@@ -241,7 +243,7 @@ CUDA/Triton 点击“编译”、PyTorch 点击“代码检查”，都只执行
 
 - CUDA C++ 会运行 NVCC 并链接当前操作的可信 harness；成功后临时二进制随后清理。
 - Triton (Python) 检查 `source.py` 的 Python 语法和 `restricted_triton_v1` AST 白名单，再在隔离 globals 中加载安全定义并确认 `solve` 存在；不会调用 `solve` 或触发 GPU JIT。
-- PyTorch (Python) 检查 Python 语法和独立的 `restricted_torch_v1` AST 白名单，只允许精确的 `import torch`、不可变字面量模块常量和一个 `solve`。策略会加载该安全定义，但不会调用 `solve` 或访问 GPU；文件/网络/进程/线程、反射、动态执行、打印、任意 helper、原地属性/下标赋值、`out=`、`torch.compile`/`torch.jit`/`torch.ops` 和现成 scaled-dot-product attention 都会被拒绝。题目参数列表会在运行阶段由同一策略结合可信 harness 再精确校验。
+- PyTorch (Python) 检查 Python 语法和独立的 `restricted_torch_v2` AST 白名单。当前 attention 题只允许精确的 `import torch`、不可变字面量模块常量和一个无继承、无 decorator、仅含 `__init__` / `forward` 的指定 class；构造器只能保存平台参数，forward 不得写实例状态。策略会加载安全定义，但不会实例化、调用 forward 或访问 GPU；文件/网络/进程/线程、反射、动态执行、打印、helper、`torch.nn`、原地属性/下标赋值、`out=`、`torch.compile`/`torch.jit`/`torch.ops` 和现成 scaled-dot-product attention 都会被拒绝。精确 class 与方法参数会在运行阶段由同一策略结合可信 harness 再校验。
 - 失败时显示用户源码中的行列号和经过路径清理、长度限制的诊断。
 - 不执行样例，不生成 benchmark，不创建性能版本。
 
@@ -251,7 +253,7 @@ PyTorch 题不进行 JIT；“代码检查”通过只表示源码满足语法�
 
 ### 5.3 运行公开样例
 
-点击“运行样例”会重新执行当前语言的预检查/编译，然后执行题面公开的样例。Triton 在此时通过同一版本化策略把受限定义加载到独立 module globals、校验 `solve` 精确参数，并在第一次 GPU 调用完成 JIT 专化；PyTorch 同样通过 `restricted_torch_v1` 加载并校验 `solve` 精确参数，再由可信 harness 检查返回 Tensor 的设备、dtype、形状、底层存储不与输入别名、输入未被修改和数值结果：
+点击“运行样例”会重新执行当前语言的预检查/编译，然后执行题面公开的样例。Triton 在此时通过同一版本化策略把受限定义加载到独立 module globals、校验 `solve` 精确参数，并在第一次 GPU 调用完成 JIT 专化；PyTorch 同样通过 `restricted_torch_v2` 加载并校验 class、构造器和 forward 精确参数，再由可信 harness 注入固定权重、调用 `forward(X, isCasual)`，并检查返回 Tensor 的设备、dtype、形状、底层存储不与输入或权重别名、所有输入未被修改和数值结果：
 
 - 输出面板按公开用例显示 pass/fail；
 - 可能显示编译错误、运行错误、CUDA error、输出超限或超时；
@@ -301,7 +303,7 @@ queued → compiling → running / validating / benchmarking → succeeded
 4. 检查环境/协议栏的“可直接比较”状态和差异列表。
 5. 使用代码快照或 Diff 查看实现差异。
 
-环境/协议栏应能看到实现语言、GPU、驱动、语言工具链、执行配置、镜像 digest、suite hash 和协议版本：CUDA 展示 CUDA Runtime/NVCC/flags；Triton 展示 Python/PyTorch/Triton/Torch CUDA/目标架构与策略；PyTorch 展示 Python/PyTorch/Torch CUDA/目标架构、`restricted_torch_v1`、matmul precision、TF32 和确定性设置。缺字段本身也是需要谨慎解释的信号。
+环境/协议栏应能看到实现语言、GPU、驱动、语言工具链、执行配置、镜像 digest、suite hash 和协议版本：CUDA 展示 CUDA Runtime/NVCC/flags；Triton 展示 Python/PyTorch/Triton/Torch CUDA/目标架构与策略；PyTorch 展示 Python/PyTorch/Torch CUDA/目标架构、`restricted_torch_v2`、matmul precision、TF32 和确定性设置。缺字段本身也是需要谨慎解释的信号。
 
 候选 X 相对 baseline B 的加速比为：
 
@@ -463,7 +465,7 @@ Triton JIT 缓存位于容器内 512 MiB 的 `exec,nosuid,nodev` `/tmp`，任务
 
 ### 11.9 PyTorch 代码检查通过，但运行失败
 
-“代码检查”只完成 Python 语法、`restricted_torch_v1` AST 白名单、安全定义加载和精确 `solve` 签名检查，不会调用 `solve`。因此，返回非 Tensor、CPU Tensor、错误 dtype/形状、返回值与输入别名、修改输入、广播或 attention mask 错误、MHA 缩放错误、GQA head 分组错误及真实 GPU 运算异常，都要到“运行样例”或“完整验证”才会暴露。先核对题面签名和返回契约，再查看 `source.py` 的安全化诊断。
+“代码检查”只完成 Python 语法、`restricted_torch_v2` AST 白名单、安全 class 加载和入口结构检查，不会实例化 class 或调用 forward。因此，返回非 Tensor、CPU Tensor、错误 dtype/形状、返回值与 `X`/权重别名、修改输入、忽略 `isCasual`、MHA head 拆分错误、GQA 分组错误及真实 GPU 运算异常，都要到“运行样例”或“完整验证”才会暴露。先核对题面 class、构造器、`forward(X, isCasual)` 和返回契约，再查看 `source.py` 的安全化诊断。
 
 纯 PyTorch 路径不做 JIT，并固定关闭 TF32、使用最高 float32 matmul precision 和确定性算法；其 512 MiB `/tmp` 为 `noexec`。不要通过 `torch.compile`、`torch.jit`、`torch.ops`、现成 scaled-dot-product attention、设备同步或修改 Runner 配置绕过题目，这些入口会被策略拒绝或破坏可比性。
 
@@ -476,7 +478,7 @@ Triton JIT 缓存位于容器内 512 MiB 的 `exec,nosuid,nodev` `/tmp`，任务
 
 内部测试失败不会显示隐藏输入。Triton 与 PyTorch 策略都拒绝文件读取、反射、host/device 打印和结果 sentinel 伪造；不能通过读取 harness 路径或篡改 `__main__` 绕过验证。
 
-当前版本只面向本机或认证局域网中的可信操作者。提交与平台 harness 仍位于同一最终进程（CUDA 链接、Triton/PyTorch 分别受限定义加载）；`restricted_triton_v1` 与 `restricted_torch_v1` 阻断已知的 Python harness 篡改和结果伪造路径，但不是通用 Python/GPU 沙箱的形式化安全证明，CUDA 同进程结果通道也不是抗作弊边界。不要把结果用于不可信用户排名或公网竞赛。
+当前版本只面向本机或认证局域网中的可信操作者。提交与平台 harness 仍位于同一最终进程（CUDA 链接、Triton/PyTorch 分别受限定义加载）；`restricted_triton_v1` 与 `restricted_torch_v2` 阻断已知的 Python harness 篡改和结果伪造路径，但不是通用 Python/GPU 沙箱的形式化安全证明，CUDA 同进程结果通道也不是抗作弊边界。不要把结果用于不可信用户排名或公网竞赛。
 
 ### 11.11 Job 一直排队
 

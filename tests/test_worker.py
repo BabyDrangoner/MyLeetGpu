@@ -124,7 +124,7 @@ class FakeRunner:
         if language == "torch_python":
             return [
                 "backend=torch_python",
-                "policy=restricted_torch_v1",
+                "policy=restricted_torch_v2",
                 f"arch=sm_{probe.cuda_arch}",
             ]
         return [*problem.compile_flags, f"-arch=sm_{probe.cuda_arch}"]
@@ -283,10 +283,8 @@ def test_torch_only_default_save_uses_torch_probe_and_persists_runtime_identity(
     worker_bundle,
 ) -> None:
     _, repository, service, runner, worker = worker_bundle
-    source = (
-        "import torch\n\n"
-        "def solve(query, key, value, attention_mask):\n"
-        "    return torch.matmul(query, value.transpose(-2, -1))\n"
+    source = (PROJECT_ROOT / "problems/multi-head-attention/torch/starter.py").read_text(
+        encoding="utf-8"
     )
     submitted = service.submit(
         problem_id="multi-head-attention",
@@ -307,7 +305,7 @@ def test_torch_only_default_save_uses_torch_probe_and_persists_runtime_identity(
     assert version.environment.backend == "torch_python"
     assert version.compile_flags_json == [
         "backend=torch_python",
-        "policy=restricted_torch_v1",
+        "policy=restricted_torch_v2",
         "arch=sm_89",
     ]
     probe_calls = [call for call in runner.calls if str(call[0]).startswith("probe_")]

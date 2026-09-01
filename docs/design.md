@@ -12,7 +12,7 @@ MyLeetGpu 是一个在 Windows + WSL2 + NVIDIA GPU 上运行的本地 GPU 编程
 
 ### 2.1 目标
 
-- 提供简体中文的桌面端 Web 界面，浏览八道原创 GPU 题目：六道 CUDA C++ / Triton Kernel 题，以及使用 PyTorch (Python) 的多头注意力（MHA）和分组查询注意力（GQA）。
+- 提供简体中文的桌面端 Web 界面，浏览八道原创 GPU 题目：六道 CUDA C++ / Triton Kernel 题，以及使用 PyTorch (Python) 的多头自注意力（MHA）和分组查询自注意力（GQA）。
 - 使用 Monaco Editor 编辑语言对应的 `solve` 接口，支持语言切换、starter code、重置以及按语言隔离的浏览器/服务端草稿自动保存。
 - 严格区分“编译”“运行公开样例”“完整验证”和“保存为性能版本”。
 - 显示经过清理和限长的 NVCC、Triton/PyTorch 提交策略、JIT、运行错误、错误答案、超时及 stdout/stderr 诊断。
@@ -128,7 +128,7 @@ problems/<slug>/
         └── benchmark.py
 ```
 
-CUDA C++ 用户只能实现 `solve.h` 约定的接口；Triton 用户文件必须提供 manifest 声明的 Python `solve(...)`，可在同一文件定义 `@triton.jit` Kernel，但只能使用 `restricted_triton_v1` 白名单允许的模块结构、launcher 和 Triton DSL。PyTorch 用户文件定义一个 `solve(...) -> torch.Tensor`，只能使用 `restricted_torch_v1` 白名单中的基础 Tensor 变换、矩阵运算、mask 和 softmax；现成 SDPA、I/O、反射、动态执行、进程与原地输出逃逸均被拒绝。入口、数据生成、拷贝、受控 stream、同步、参考实现、结果验证和计时均由语言对应的可信平台 harness 控制。题目包只需包含自己声明的实现目录；算子题与 attention 题不必支持相同语言。
+CUDA C++ 用户只能实现 `solve.h` 约定的接口；Triton 用户文件必须提供 manifest 声明的 Python `solve(...)`，可在同一文件定义 `@triton.jit` Kernel，但只能使用 `restricted_triton_v1` 白名单允许的模块结构、launcher 和 Triton DSL。PyTorch 用户文件按 manifest 定义一个精确签名的 `solve` 或受限普通 class；当前 MHA/GQA 使用由平台注入固定权重的 class，唯一前向入口为 `forward(X, isCasual)`。`restricted_torch_v2` 只允许基础 Tensor 变换、矩阵运算、mask 和 softmax，并拒绝继承、额外方法、forward 状态写入、现成 SDPA、I/O、反射、动态执行、进程与原地输出逃逸。入口、数据生成、拷贝、受控 stream、同步、参考实现、结果验证和计时均由语言对应的可信平台 harness 控制。题目包只需包含自己声明的实现目录；算子题与 attention 题不必支持相同语言。
 
 ### 5.2 Manifest 最低字段
 
@@ -302,10 +302,10 @@ Worker 启动时只清理同时带 Runner 标记和当前 installation 标记的
 ```text
 CUDA:   源码快照 → 无 GPU 编译容器 → NVCC → 清理/截断诊断 → 清理产物 → Job 终态
 Triton: 源码快照 → 无 GPU 预检查容器 → 语法 + restricted_triton_v1 策略检查 → 清理/截断诊断 → Job 终态
-PyTorch: 源码快照 → 无 GPU 预检查容器 → 语法 + restricted_torch_v1 策略检查 → 清理/截断诊断 → Job 终态
+PyTorch: 源码快照 → 无 GPU 预检查容器 → 语法 + restricted_torch_v2 策略检查 → 清理/截断诊断 → Job 终态
 ```
 
-预检查/编译容器不获得 GPU，只生成临时产物，不创建 Version 或 BenchmarkRun。CUDA C++ 动作用 NVCC 完成编译和 harness 链接。Triton 预检先解析 AST，拒绝非白名单 import、模块级执行、反射、I/O、进程/线程、打印、dunder、动态执行及非白名单调用；随后在隔离 globals 中只加载字面量常量、`@triton.jit` 定义和直线式 `solve` launcher，不调用 `solve`，也不进行 GPU JIT。第一次带真实 Tensor 的 GPU 调用才完成对应参数/`tl.constexpr` 的 JIT 专化，因此 Triton“编译成功”不代表 Kernel 已经成功 JIT。PyTorch 预检使用独立的 `restricted_torch_v1`，只加载字面量常量和单个精确签名的 `solve`，允许题面列出的基础 Tensor 组合，拒绝现成 attention、I/O、反射、动态执行、任意 helper、原地属性/下标赋值与 `out=`。诊断会删除宿主机路径、spool 路径和内部 harness 路径，保留用户文件名、行列号和关键错误；Runner 合并捕获 stdout/stderr，并对合并后的字节总量设限、标注超限或截断。
+预检查/编译容器不获得 GPU，只生成临时产物，不创建 Version 或 BenchmarkRun。CUDA C++ 动作用 NVCC 完成编译和 harness 链接。Triton 预检先解析 AST，拒绝非白名单 import、模块级执行、反射、I/O、进程/线程、打印、dunder、动态执行及非白名单调用；随后在隔离 globals 中只加载字面量常量、`@triton.jit` 定义和直线式 `solve` launcher，不调用 `solve`，也不进行 GPU JIT。第一次带真实 Tensor 的 GPU 调用才完成对应参数/`tl.constexpr` 的 JIT 专化，因此 Triton“编译成功”不代表 Kernel 已经成功 JIT。PyTorch 预检使用独立的 `restricted_torch_v2`，只加载字面量常量与单个精确 `solve`，或一个无继承且仅含 `__init__` / `forward` 的精确 class；MHA/GQA 构造器只能保存平台权重，forward 不能写实例状态。策略允许题面列出的基础 Tensor 组合，拒绝现成 attention、I/O、反射、动态执行、任意 helper、原地属性/下标赋值与 `out=`。诊断会删除宿主机路径、spool 路径和内部 harness 路径，保留用户文件名、行列号和关键错误；Runner 合并捕获 stdout/stderr，并对合并后的字节总量设限、标注超限或截断。
 
 ### 9.3 运行公开样例
 
@@ -460,7 +460,7 @@ NVIDIA 容器运行时仍共享宿主内核、Windows 驱动和物理 GPU。RTX 
 
 因此，“认证入口 + 容器”只是在可信单机/局域网前提下的纵深防御，不构成公网沙箱、安全边界证明或多租户隔离。若未来需要接收不可信远程用户，必须改为独占机器/虚拟机或可验证的硬件级隔离，并加入身份、授权、速率限制、审计、传输加密和主机级恢复机制。
 
-Validator/benchmark harness 与提交仍处于同一最终进程：CUDA 通过链接，Triton/PyTorch 通过各自的受限定义加载。CUDA 的结果 sentinel 不是抗主动作弊的加密边界；`restricted_triton_v1` 与 `restricted_torch_v1` 会在执行前拒绝 host I/O、反射、进程终止、打印和非白名单调用，从而阻断已知的 harness 读取及伪造 sentinel/样本路径，但它们不是通用 Python 沙箱的形式化证明。平台仍只面向可信本机/LAN 操作者，不应把当前结果用于不可信用户排名或公网竞赛；若要接收对抗性远程提交，必须把受信判定与用户执行拆到独立保护域和结果通道。
+Validator/benchmark harness 与提交仍处于同一最终进程：CUDA 通过链接，Triton/PyTorch 通过各自的受限定义加载。CUDA 的结果 sentinel 不是抗主动作弊的加密边界；`restricted_triton_v1` 与 `restricted_torch_v2` 会在执行前拒绝 host I/O、反射、进程终止、打印和非白名单调用，从而阻断已知的 harness 读取及伪造 sentinel/样本路径，但它们不是通用 Python 沙箱的形式化安全证明。平台仍只面向可信本机/LAN 操作者，不应把当前结果用于不可信用户排名或公网竞赛；若要接收对抗性远程提交，必须把受信判定与用户执行拆到独立保护域和结果通道。
 
 ## 12. 错误处理、熔断与恢复
 

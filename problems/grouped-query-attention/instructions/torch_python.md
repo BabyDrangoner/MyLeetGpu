@@ -1,19 +1,28 @@
 ## PyTorch Python 接口
 
-提交源码只需导入 `torch` 并定义下列函数：
+提交源码只需精确导入 `torch` 并定义下列普通类：
 
 ```python
-def solve(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: torch.Tensor,
-) -> torch.Tensor:
-    ...
+class GroupedQueryAttention:
+    def __init__(
+        self,
+        numQueryHeads: int,
+        numKeyValueHeads: int,
+        qWeight: torch.Tensor,
+        kWeight: torch.Tensor,
+        vWeight: torch.Tensor,
+        outputWeight: torch.Tensor,
+    ):
+        ...
+
+    def forward(self, X: torch.Tensor, isCasual: bool) -> torch.Tensor:
+        ...
 ```
 
-四个参数都是 GPU 0 上的连续 Tensor，平台调用时已经进入受控的 `torch.cuda.stream(stream)` 与 `torch.inference_mode()` 上下文。返回值必须是新的 CUDA `torch.float32` Tensor，形状为 `[batch, query_heads, query_length, head_dim]`。不要修改输入、移动 Tensor 到 CPU、显式同步设备或依赖上一次调用留下的状态。
+不要继承 `torch.nn.Module`，也不要定义其他函数、方法或类。平台会为每个用例构造一次实例，并在受控的 `torch.cuda.stream(stream)` 与 `torch.inference_mode()` 上下文中直接调用 `forward`。
 
-query heads 按连续组映射到 key/value heads。若 `group_size = query.shape[1] // key.shape[1]`，query head `h` 必须使用 key/value head `h // group_size`；可以用等价于 `repeat_interleave(..., dim=1)` 的 Tensor 变换表达。
+`forward` 的业务输入只有 `X` 和 `isCasual`。四个权重均按题面给出的形状直接右乘：`X @ qWeight`、`X @ kWeight`、`X @ vWeight`，合并 heads 后再右乘 `outputWeight`。构造器中的 Tensor 和 `X` 均为只读状态；返回值必须是新的 CUDA `torch.float32` Tensor，形状与 `X` 相同。
 
-提交使用版本化的受限 PyTorch 子集。模块级只允许精确的 `import torch`、不可变字面量常量和一个 `solve`；函数内可使用题目所需的白名单 Tensor 运算。文件、网络、进程、线程、反射、dunder、动态执行、打印、断点、全局状态修改、CUDA 计时/同步、`torch.compile`、`torch.jit`、`torch.ops` 以及 `torch.nn.functional.scaled_dot_product_attention` 都会在预检阶段被拒绝。
+当 `isCasual` 为 `True` 时，需要动态构造包含主对角线的下三角 mask。可以使用 `torch.arange`、广播比较、`masked_fill` 与 `float("-inf")` 完成；为 `False` 时不要应用 mask。
+
+提交使用版本化的受限 PyTorch 子集。模块级只允许精确的 `import torch` 和一个满足接口的 `GroupedQueryAttention` 类；类只允许指定的构造器和 `forward`。题目需要的 reshape、transpose、contiguous、matmul、repeat-interleave、arange、比较、mask 和 softmax 已加入白名单。文件、网络、进程、线程、反射、任意 dunder 访问、动态执行、打印、断点、全局状态修改、forward 状态写入、CUDA 计时/同步、`torch.compile`、`torch.jit`、`torch.ops` 以及现成 scaled-dot-product attention 都会在预检阶段被拒绝。

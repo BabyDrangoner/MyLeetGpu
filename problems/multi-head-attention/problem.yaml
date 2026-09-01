@@ -1,8 +1,8 @@
 schema_version: 2
 slug: multi-head-attention
-title: 多头缩放点积注意力
+title: 多头自注意力
 difficulty: medium
-revision: 1
+revision: 2
 default_language: torch_python
 
 implementations:
@@ -11,8 +11,11 @@ implementations:
     starter: torch/starter.py
     statement_appendix: instructions/torch_python.md
     signature:
-      symbol: solve
-      declaration: "def solve(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor"
+      symbol: MultiHeadAttention
+      declaration: |-
+        class MultiHeadAttention:
+            def __init__(self, numHeads: int, qWeight: torch.Tensor, kWeight: torch.Tensor, vWeight: torch.Tensor, outputWeight: torch.Tensor): ...
+            def forward(self, X: torch.Tensor, isCasual: bool) -> torch.Tensor: ...
     harness:
       validator: torch/harness/validator.py
       benchmark: torch/harness/benchmark.py
@@ -23,34 +26,49 @@ implementations:
 
 types:
   inputs:
-    - name: query
+    - name: X
       type: float32
-      shape: [batch, heads, query_length, head_dim]
+      shape: [batch, sequence_length, embed_dim]
       layout: contiguous
       memory: device
       access: read_only
-    - name: key
-      type: float32
-      shape: [batch, heads, key_length, head_dim]
-      layout: contiguous
-      memory: device
-      access: read_only
-    - name: value
-      type: float32
-      shape: [batch, heads, key_length, head_dim]
-      layout: contiguous
-      memory: device
-      access: read_only
-    - name: attention_mask
+    - name: isCasual
       type: bool
-      shape: [batch, 1, query_length, key_length]
+      shape: []
+      memory: host
+      access: read_only
+  constructor_state:
+    - name: numHeads
+      type: integer
+      access: read_only
+    - name: qWeight
+      type: float32
+      shape: [embed_dim, embed_dim]
+      layout: contiguous
+      memory: device
+      access: read_only
+    - name: kWeight
+      type: float32
+      shape: [embed_dim, embed_dim]
+      layout: contiguous
+      memory: device
+      access: read_only
+    - name: vWeight
+      type: float32
+      shape: [embed_dim, embed_dim]
+      layout: contiguous
+      memory: device
+      access: read_only
+    - name: outputWeight
+      type: float32
+      shape: [embed_dim, embed_dim]
       layout: contiguous
       memory: device
       access: read_only
   outputs:
     - name: output
       type: float32
-      shape: [batch, heads, query_length, head_dim]
+      shape: [batch, sequence_length, embed_dim]
       memory: device
       access: return_value
 
@@ -58,32 +76,42 @@ constraints:
   batch:
     min: 1
     max: 4
-  heads:
+  sequence_length:
+    min: 1
+    max: 1024
+  embed_dim:
+    min: 1
+    max: 1024
+  num_heads:
     min: 1
     max: 32
-  query_length:
-    min: 1
-    max: 1024
-  key_length:
-    min: 1
-    max: 1024
-  head_dim:
-    min: 1
-    max: 128
+  head_relationship:
+    embed_dim_divisible_by_num_heads: true
+    head_dim: embed_dim_divided_by_num_heads
   values:
     finite: true
-  attention_mask:
-    true_means: participates_in_attention
-    at_least_one_true_per_query: true
-  scaling: inverse_sqrt_head_dim
+  projection:
+    convention: right_multiply
+    formulas:
+      - Q = X @ qWeight
+      - K = X @ kWeight
+      - V = X @ vWeight
+      - output = concatenated_heads @ outputWeight
+  attention:
+    kind: self_attention
+    causal_true_means: lower_triangle_including_diagonal
+    scaling: inverse_sqrt_head_dim
+    softmax_dimension: key_sequence
+  bias: false
   dropout: 0.0
-  aliasing: output_must_not_alias_inputs
+  aliasing: output_must_not_alias_inputs_or_state
   input_mutation: forbidden
+  state_mutation: forbidden
 
 tolerance:
   mode: float
-  atol: 0.0002
-  rtol: 0.0002
+  atol: 0.0004
+  rtol: 0.0004
   nan_equal: false
   infinity: same_sign
 
@@ -91,30 +119,27 @@ public:
   seed: 230901
   timeout_ms: 15000
   cases:
-    - name: sample_handcrafted
+    - name: sample_noncausal
       batch: 1
-      heads: 2
-      query_length: 2
-      key_length: 3
-      head_dim: 4
+      sequence_length: 3
+      embed_dim: 8
+      num_heads: 2
+      is_casual: false
       pattern: sequence
-      mask_pattern: all
-    - name: sample_padding_mask
+    - name: sample_causal
       batch: 2
-      heads: 4
-      query_length: 5
-      key_length: 7
-      head_dim: 8
+      sequence_length: 7
+      embed_dim: 32
+      num_heads: 4
+      is_casual: true
       pattern: random
-      mask_pattern: prefix
-    - name: sample_causal_mask
+    - name: sample_odd_head_dim
       batch: 1
-      heads: 3
-      query_length: 9
-      key_length: 9
-      head_dim: 16
-      pattern: random
-      mask_pattern: causal
+      sequence_length: 5
+      embed_dim: 21
+      num_heads: 3
+      is_casual: false
+      pattern: head_markers
 
 internal:
   seeds: [314159, 271828, 1618033]
@@ -123,94 +148,84 @@ internal:
     - name: internal_case_1
       category: boundary
       batch: 1
-      heads: 1
-      query_length: 1
-      key_length: 1
-      head_dim: 1
+      sequence_length: 1
+      embed_dim: 1
+      num_heads: 1
+      is_casual: true
       pattern: constant
-      mask_pattern: all
     - name: internal_case_2
       category: boundary
       batch: 2
-      heads: 1
-      query_length: 1
-      key_length: 17
-      head_dim: 3
+      sequence_length: 1
+      embed_dim: 12
+      num_heads: 3
+      is_casual: false
       pattern: random
-      mask_pattern: prefix
     - name: internal_case_3
       category: boundary
-      batch: 2
-      heads: 4
-      query_length: 7
-      key_length: 11
-      head_dim: 16
+      batch: 1
+      sequence_length: 9
+      embed_dim: 20
+      num_heads: 5
+      is_casual: true
       pattern: random
-      mask_pattern: single_key
     - name: internal_case_4
       category: boundary
       batch: 1
-      heads: 7
-      query_length: 33
-      key_length: 33
-      head_dim: 24
+      sequence_length: 33
+      embed_dim: 168
+      num_heads: 7
+      is_casual: true
       pattern: random
-      mask_pattern: causal
     - name: internal_case_5
       category: invariant
-      batch: 1
-      heads: 4
-      query_length: 5
-      key_length: 6
-      head_dim: 8
-      pattern: head_markers
-      mask_pattern: staggered
+      batch: 2
+      sequence_length: 6
+      embed_dim: 48
+      num_heads: 6
+      is_casual: false
+      pattern: projection_markers
     - name: internal_case_6
       category: numerical
       batch: 1
-      heads: 4
-      query_length: 17
-      key_length: 19
-      head_dim: 64
+      sequence_length: 17
+      embed_dim: 256
+      num_heads: 4
+      is_casual: true
       pattern: extreme_logits
-      mask_pattern: staggered
     - name: internal_case_7
       category: random
       batch: 2
-      heads: 8
-      query_length: 65
-      key_length: 97
-      head_dim: 32
+      sequence_length: 65
+      embed_dim: 256
+      num_heads: 8
+      is_casual: false
       pattern: random
-      mask_pattern: prefix
 
 benchmark:
-  protocol_version: "1"
-  suite_seed: 20260831
+  protocol_version: "2"
+  suite_seed: 20260902
   sizes:
-    - label: B1-H8-Q128-K128-D64
+    - label: B1-H8-S128-E512
       batch: 1
-      heads: 8
-      query_length: 128
-      key_length: 128
-      head_dim: 64
-      mask_pattern: all
-      inner_repetitions: 8
-    - label: B2-H12-Q384-K512-D64
+      sequence_length: 128
+      embed_dim: 512
+      num_heads: 8
+      is_casual: false
+      inner_repetitions: 4
+    - label: B2-H12-S384-E768
       batch: 2
-      heads: 12
-      query_length: 384
-      key_length: 512
-      head_dim: 64
-      mask_pattern: prefix
+      sequence_length: 384
+      embed_dim: 768
+      num_heads: 12
+      is_casual: true
       inner_repetitions: 1
-    - label: B1-H16-Q1024-K1024-D64
+    - label: B1-H16-S1024-E1024
       batch: 1
-      heads: 16
-      query_length: 1024
-      key_length: 1024
-      head_dim: 64
-      mask_pattern: causal
+      sequence_length: 1024
+      embed_dim: 1024
+      num_heads: 16
+      is_casual: true
       inner_repetitions: 1
   warmup: 5
   iterations: 20

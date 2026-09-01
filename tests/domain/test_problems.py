@@ -22,6 +22,10 @@ KERNEL_SLUGS = {
     "vector-addition",
 }
 TORCH_SLUGS = {"multi-head-attention", "grouped-query-attention"}
+TORCH_ENTRYPOINTS = {
+    "multi-head-attention": "MultiHeadAttention",
+    "grouped-query-attention": "GroupedQueryAttention",
+}
 EXPECTED_SLUGS = KERNEL_SLUGS | TORCH_SLUGS
 
 
@@ -148,13 +152,27 @@ def test_each_attention_problem_is_torch_only_and_uses_its_default_assets(
     assert implementation.compile_flags == []
     assert implementation.toolchain_profile == "torch_cuda_v1"
     assert implementation.starter_code.strip()
-    assert "def solve(" in implementation.starter_code
+    assert problem.manifest.revision == "2"
+    starter_tree = ast.parse(implementation.starter_code)
+    entry_class = next(
+        node
+        for node in starter_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == TORCH_ENTRYPOINTS[slug]
+    )
+    forward = next(
+        node
+        for node in entry_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "forward"
+    )
+    assert [argument.arg for argument in forward.args.args] == ["self", "X", "isCasual"]
     assert implementation.statement_appendix
     assert "torch.Tensor" in implementation.statement_appendix
     assert implementation.validator_path.is_file()
     assert implementation.benchmark_path.is_file()
-    assert implementation.signature.symbol == "solve"
+    assert implementation.signature.symbol == TORCH_ENTRYPOINTS[slug]
     assert len(implementation.suite_hash) == 64
+    assert [item["name"] for item in problem.manifest.types["inputs"]] == ["X", "isCasual"]
+    assert problem.manifest.types["inputs"][1]["type"] == "bool"
 
     assert problem.starter_code == implementation.starter_code
     assert problem.header_path is None
@@ -300,7 +318,7 @@ def test_public_torch_problem_payload_uses_default_language_without_leaking_harn
     assert "harness" not in detail
     assert "suite_seed" not in serialized
     assert "torch_cuda_v1" not in serialized
-    assert "restricted_torch_v1" not in serialized
+    assert "restricted_torch_" not in serialized
 
 
 def test_public_summary_does_not_include_source_or_test_configuration(
@@ -517,7 +535,8 @@ def test_torch_assets_are_valid_python_and_mirror_benchmark_manifest(
     benchmark = implementation.benchmark_path.read_text(encoding="utf-8")
     assignments = _literal_assignments(implementation.benchmark_path)
 
-    assert "def solve(" in implementation.starter_code
+    assert f"class {TORCH_ENTRYPOINTS[slug]}:" in implementation.starter_code
+    assert "isCasual" in implementation.starter_code
     assert "scaled_dot_product_attention" not in implementation.starter_code
     assert "torch.cuda.stream(stream)" in validator
     assert "torch.cuda.stream(stream)" in benchmark
@@ -536,6 +555,8 @@ def test_torch_assets_are_valid_python_and_mirror_benchmark_manifest(
         assert "torch.use_deterministic_algorithms(True)" in harness
     assert validator.count("MYLEETGPU_RESULT=") == 1
     assert benchmark.count("MYLEETGPU_RESULT=") == 1
+    assert ".forward(" in validator
+    assert ".forward(" in benchmark
     assert assignments["PROTOCOL_VERSION"] == problem.manifest.benchmark.protocol_version
     assert assignments["WARMUP"] == problem.manifest.benchmark.warmup
     assert assignments["ITERATIONS"] == problem.manifest.benchmark.iterations

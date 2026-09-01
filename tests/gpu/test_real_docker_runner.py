@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from myleetgpu.config import Settings
 from myleetgpu.domain.problems import KernelLanguage, Problem, ProblemCatalog
-from myleetgpu.runner.docker import TRITON_PYTHON, DockerRunner, _safe_name
+from myleetgpu.runner.docker import TORCH_PYTHON, TRITON_PYTHON, DockerRunner, _safe_name
 
 pytestmark = pytest.mark.gpu
 
@@ -116,6 +116,34 @@ def compile_triton_snapshot(
         source_path,
         harness_kind=harness_kind,
         language=TRITON_PYTHON,
+        implementation=implementation,
+    )
+    assert compiled.succeeded, compiled.diagnostics
+    assert not compiled.timed_out
+    assert not compiled.output_limited
+    assert compiled.executable is not None
+    return task_root, compiled.executable
+
+
+def compile_torch_snapshot(
+    runner: DockerRunner,
+    problem: Problem,
+    task_name: str,
+    source: str,
+    *,
+    harness_kind: str = "validator",
+) -> tuple[Path, Path]:
+    implementation = problem.get_implementation(KernelLanguage.TORCH_PYTHON)
+    task_root = runner.settings.jobs_dir / task_name
+    task_root.mkdir()
+    source_path = task_root / "source-snapshot.py"
+    source_path.write_text(source, encoding="utf-8")
+    compiled = runner.compile(
+        task_root,
+        problem,
+        source_path,
+        harness_kind=harness_kind,
+        language=TORCH_PYTHON,
         implementation=implementation,
     )
     assert compiled.succeeded, compiled.diagnostics
@@ -243,6 +271,20 @@ def test_real_triton_probe_reports_the_pinned_toolchain(real_runner: DockerRunne
     assert probe.toolchain["torch_cuda_version"] == "12.4"
 
 
+def test_real_torch_probe_reports_the_pinned_toolchain(real_runner: DockerRunner) -> None:
+    probe = real_runner.probe_torch_environment(force=True)
+
+    assert probe.healthy, probe.error
+    assert probe.backend == "torch_python"
+    assert probe.gpu_name is not None and "RTX 4060" in probe.gpu_name
+    assert probe.compute_capability == "8.9"
+    assert probe.cuda_arch == "89"
+    assert probe.image_digest and "14611869895df612" in probe.image_digest
+    assert probe.toolchain["python_version"] == "3.11.10"
+    assert str(probe.toolchain["torch_version"]).startswith("2.5.1")
+    assert probe.toolchain["torch_cuda_version"] == "12.4"
+
+
 def test_real_triton_preflight_rejects_result_channel_forgery(
     real_runner: DockerRunner,
     problem_catalog: ProblemCatalog,
@@ -363,6 +405,88 @@ def test_real_runner_collects_event_samples_for_each_triton_problem(
 
         assert result.succeeded, result.output
         assert result.parsed is not None
+        measurements = result.parsed["measurements"]
+        assert [item["label"] for item in measurements] == [
+            size.label for size in problem.manifest.benchmark.sizes
+        ]
+        assert all(
+            len(item["samples_ms"]) == problem.manifest.benchmark.iterations
+            for item in measurements
+        )
+        assert all(
+            isinstance(sample, int | float) and sample >= 0
+            for item in measurements
+            for sample in item["samples_ms"]
+        )
+    finally:
+        real_runner.cleanup_task(task_root)
+
+
+@pytest.mark.parametrize(
+    "slug",
+    ["multi-head-attention", "grouped-query-attention"],
+)
+def test_real_runner_fully_validates_each_torch_attention_class(
+    real_runner: DockerRunner,
+    problem_catalog: ProblemCatalog,
+    slug: str,
+) -> None:
+    problem = problem_catalog.get(slug)
+    implementation = problem.get_implementation(KernelLanguage.TORCH_PYTHON)
+    task_root, executable = compile_torch_snapshot(
+        real_runner,
+        problem,
+        f"torch-validate-{slug}",
+        implementation.starter_code,
+    )
+    try:
+        result = real_runner.execute(
+            task_root,
+            executable,
+            mode="full",
+            timeout_seconds=problem.manifest.timeouts.validation_ms / 1000,
+            language=TORCH_PYTHON,
+        )
+
+        assert result.succeeded, result.output
+        assert result.parsed is not None
+        assert result.parsed["status"] == "passed"
+        total = len(problem.manifest.public.cases) + len(problem.manifest.internal.cases)
+        assert result.parsed["summary"] == {"total": total, "passed": total, "failed": 0}
+    finally:
+        real_runner.cleanup_task(task_root)
+
+
+@pytest.mark.parametrize(
+    "slug",
+    ["multi-head-attention", "grouped-query-attention"],
+)
+def test_real_runner_collects_event_samples_for_each_torch_attention_class(
+    real_runner: DockerRunner,
+    problem_catalog: ProblemCatalog,
+    slug: str,
+) -> None:
+    problem = problem_catalog.get(slug)
+    implementation = problem.get_implementation(KernelLanguage.TORCH_PYTHON)
+    task_root, executable = compile_torch_snapshot(
+        real_runner,
+        problem,
+        f"torch-benchmark-{slug}",
+        implementation.starter_code,
+        harness_kind="benchmark",
+    )
+    try:
+        result = real_runner.execute(
+            task_root,
+            executable,
+            mode="benchmark",
+            timeout_seconds=problem.manifest.timeouts.benchmark_ms / 1000,
+            language=TORCH_PYTHON,
+        )
+
+        assert result.succeeded, result.output
+        assert result.parsed is not None
+        assert result.parsed["status"] == "passed"
         measurements = result.parsed["measurements"]
         assert [item["label"] for item in measurements] == [
             size.label for size in problem.manifest.benchmark.sizes

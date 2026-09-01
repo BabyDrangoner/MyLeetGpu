@@ -1,45 +1,70 @@
-# 分组查询注意力
+# 分组查询自注意力
 
-Grouped Query Attention（GQA）让一组连续的 query heads 共享同一个 key/value head。给定 `query_heads` 个 query heads 和 `key_value_heads` 个 key/value heads，平台保证：
+实现一个带线性投影的 Grouped Query Self-Attention（GQA）类。类的 `forward` 只接收同一个输入 `X` 和 Python 布尔值 `isCasual`；query、key、value 都必须从 `X` 计算，因此本题是自注意力而不是交叉注意力。
+
+平台通过构造器提供 query head 数、key/value head 数和四个只读权重：
 
 ```text
-query_heads % key_value_heads == 0
-group_size = query_heads / key_value_heads
+X            : [batch, sequence_length, embedding_dim]
+qWeight      : [embedding_dim, embedding_dim]
+kWeight      : [embedding_dim, key_value_dim]
+vWeight      : [embedding_dim, key_value_dim]
+outputWeight : [embedding_dim, embedding_dim]
+
+head_dim     = embedding_dim / numQueryHeads
+key_value_dim = numKeyValueHeads * head_dim
+```
+
+所有权重都在右侧参与矩阵乘法，不需要转置：
+
+```text
+Q = X @ qWeight
+K = X @ kWeight
+V = X @ vWeight
+```
+
+把 `Q` 拆为 `numQueryHeads` 个 heads，把 `K`、`V` 拆为 `numKeyValueHeads` 个 heads。平台保证：
+
+```text
+embedding_dim % numQueryHeads == 0
+numQueryHeads % numKeyValueHeads == 0
+group_size = numQueryHeads / numKeyValueHeads
 kv_head(query_head) = query_head // group_size
 ```
 
-对每个 query head，使用映射到的 key/value head 完成缩放点积注意力：
+也就是说，一组连续的 query heads 共享同一个 K/V head。扩展 K/V 时必须使用与 `repeat_interleave(..., dim=1)` 等价的连续分组语义，不能循环重复完整 head 序列。
+
+对每个 query head 计算缩放点积注意力：
 
 ```text
-scores = query @ grouped_key.transpose(-2, -1) / sqrt(head_dim)
+scores = Q @ grouped_K.transpose(-2, -1) / sqrt(head_dim)
 weights = softmax(mask(scores), dim=-1)
-output = weights @ grouped_value
+context = weights @ grouped_V
+output = merge_heads(context) @ outputWeight
 ```
 
-`attention_mask` 中的 `True` 表示对应 key 可以参与注意力，`False` 表示必须在 softmax 前屏蔽。平台保证每个 query 至少有一个可参与的 key。
+当 `isCasual` 为 `True` 时，位置 `i` 只能关注位置 `0..i`，即使用包含主对角线的下三角 causal mask；为 `False` 时不屏蔽任何位置。参数名按题目接口拼写为 `isCasual`，其语义是标准的 `is_causal` 开关。
 
 ## 实现约束
 
-本题输入已经完成线性投影，不包含输出投影、dropout 和反向传播。四个输入均为 GPU 0 上的连续 Tensor：
+提交必须定义题目指定的普通 Python 类，不继承 `torch.nn.Module`。平台只在每个验证用例开始时构造一次实例，并复用该实例调用 `forward`。构造器参数是只读状态，不能在 `forward` 中修改或替换；不得依赖跨调用缓存。
 
-- `query` 的形状为 `[batch, query_heads, query_length, head_dim]`；
-- `key`、`value` 的形状为 `[batch, key_value_heads, key_length, head_dim]`；
-- `attention_mask` 的形状为 `[batch, 1, query_length, key_length]`，dtype 为 `torch.bool`。
+`X` 与四个权重均为 GPU 0 上连续、有限的 `torch.float32` Tensor。请返回形状为 `[batch, sequence_length, embedding_dim]` 的新 CUDA `torch.float32` Tensor；输出不得复用 `X` 或任一权重的底层存储，也不得修改任何输入或构造器状态。
 
-浮点输入均为有限 `torch.float32`。请返回形状为 `[batch, query_heads, query_length, head_dim]` 的新 `torch.float32` CUDA Tensor；不得修改或复用输入存储。平台已进入受控 CUDA stream 和 inference mode，不要移动数据到 CPU、执行设备级同步或修改全局 PyTorch 状态。
+本题没有 bias、dropout、padding mask、输出残差或反向传播。平台已经进入受控 CUDA stream 和 inference mode；不要移动数据到 CPU、显式同步设备或修改全局 PyTorch 状态。
 
-`key_value_heads == 1` 是 Multi-Query Attention 边界，`key_value_heads == query_heads` 则退化为普通 MHA；实现必须同时正确处理。特别注意连续分组要求 `repeat_interleave` 语义，而不是把所有 key/value heads 循环重复。
+`numKeyValueHeads == 1` 是 Multi-Query Attention 边界，`numKeyValueHeads == numQueryHeads` 则退化为普通 MHA，两种情况都必须正确处理。
 
 ## 正确性
 
-参考实现使用更高精度独立计算，判定条件为：
+参考实现使用 CPU `float64` 独立完成投影、分组、mask、softmax 和输出投影，判定条件为：
 
 ```text
-abs(actual - expected) <= 2e-4 + 2e-4 * abs(expected)
+abs(actual - expected) <= 3e-4 + 3e-4 * abs(expected)
 ```
 
-NaN 和无穷值不会通过。公开用例覆盖可辨认的 head 分组、padding mask 和 causal mask；完整验证还覆盖 MQA、退化 MHA、奇数组大小、单 query、极端 logits 和固定随机大输入，以检查 head 映射、缩放、mask、softmax 轴与数值稳定性。
+NaN 和无穷值不会通过。公开与隐藏用例覆盖可辨认的连续 head 分组、MQA、退化 MHA、奇数组大小、单元素边界、causal/non-causal 成对输入、极端 logits 和较大随机输入。
 
 ## 性能说明
 
-平台预先生成并上传输入，完成预热后使用当前 stream 上的 CUDA Events 采样。短用例会在一个计时区间内重复调用 `solve` 并折算为单次耗时。计时包含实现产生的全部 GPU 工作与输出分配；不能调用平台禁止的内置 attention、编译器或计时 API 绕过题目。
+Benchmark 在计时前生成并上传 `X` 与权重，构造一次 `GroupedQueryAttention` 实例并完成正确性检查。预热后，平台使用当前 stream 上的 CUDA Events 只采样重复调用 `forward(X, isCasual)` 产生的 GPU 工作；类构造不计入耗时，输出分配、投影、mask、softmax 和输出投影均计入耗时。

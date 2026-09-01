@@ -1,35 +1,49 @@
-# 多头缩放点积注意力
+# 多头自注意力
 
-给定已经完成线性投影的多头 `query`、`key` 和 `value`，请实现多头缩放点积注意力的前向计算。对每个 batch 和 head，定义：
+请实现一个普通 Python 类 `MultiHeadAttention`，使用同一个输入 `X` 生成 query、key 和 value，并完成多头缩放点积自注意力。类不继承 `torch.nn.Module`；平台把固定的投影权重传给构造器，随后只用 `X` 和 `isCasual` 调用 `forward`。
+
+令 `X` 的形状为 `[batch, sequence_length, embed_dim]`，所有权重均为 `[embed_dim, embed_dim]`。投影使用右乘约定：
 
 ```text
-scores = query @ key.transpose(-2, -1) / sqrt(head_dim)
-weights = softmax(mask(scores), dim=-1)
-output = weights @ value
+Q = X @ qWeight
+K = X @ kWeight
+V = X @ vWeight
 ```
 
-`attention_mask` 中的 `True` 表示该 key 可以参与注意力，`False` 表示对应分数必须在 softmax 前被屏蔽。平台保证每个 query 至少有一个可参与的 key。
+`embed_dim` 一定能被 `numHeads` 整除。把 Q、K、V 拆成 `numHeads` 个 head 后，对每个 batch 和 head 计算：
 
-## 实现约束
+```text
+scores = Q @ K.transpose(-2, -1) / sqrt(head_dim)
+weights = softmax(mask(scores), dim=-1)
+context = weights @ V
+output = concatenate(context heads) @ outputWeight
+```
 
-本题只考察预投影后的 attention 核心，不包含 Q/K/V 线性投影、输出投影、head 拼接、dropout 和反向传播。四个输入均为 GPU 0 上的连续 Tensor：
+这是自注意力，因此 query 和 key 的序列长度相同。题目不包含 bias、dropout、残差连接、归一化或反向传播。
 
-- `query` 的形状为 `[batch, heads, query_length, head_dim]`；
-- `key`、`value` 的形状为 `[batch, heads, key_length, head_dim]`；
-- `attention_mask` 的形状为 `[batch, 1, query_length, key_length]`，dtype 为 `torch.bool`，在 head 维广播。
+## Causal 语义
 
-浮点输入均为有限 `torch.float32`。请返回形状为 `[batch, heads, query_length, head_dim]` 的新 `torch.float32` CUDA Tensor；不得修改或复用任何输入的存储。平台已进入受控 CUDA stream 和 inference mode，不要移动数据到 CPU、执行设备级同步或修改全局 PyTorch 状态。
+`isCasual` 是平台传入的 Python `bool`，名称按接口约定保留。当它为 `False` 时，每个 token 可以关注整个序列；当它为 `True` 时，第 `i` 个 query 只能关注位置 `0..i`，即使用包含对角线的下三角 mask。必须在 softmax 之前屏蔽未来位置。
+
+## 输入与状态约束
+
+- `X` 和四个权重都是 GPU 0 上连续、有限的 `torch.float32` Tensor。
+- `X` 的形状为 `[batch, sequence_length, embed_dim]`。
+- `qWeight`、`kWeight`、`vWeight` 和 `outputWeight` 的形状均为 `[embed_dim, embed_dim]`。
+- 构造器只保存平台传入的 head 数和权重；不得修改或替换这些状态。
+- `forward` 必须返回新的 `[batch, sequence_length, embed_dim]` CUDA Tensor，不得修改或复用 `X` 或任一权重的存储。
+- 平台已经进入受控 CUDA stream 和 inference mode；不要移动数据到 CPU、显式同步设备或依赖跨调用的可变状态。
 
 ## 正确性
 
-参考实现使用更高精度计算缩放、mask、softmax 和加权求和。结果需满足：
+参考实现使用 float64 完成投影、缩放、mask、softmax、head 合并和输出投影，最后转换为 float32。结果需满足：
 
 ```text
-abs(actual - expected) <= 2e-4 + 2e-4 * abs(expected)
+abs(actual - expected) <= 4e-4 + 4e-4 * abs(expected)
 ```
 
-NaN 和无穷值不会通过。公开用例覆盖手工小例子、padding mask 和 causal mask；完整验证还覆盖单 token、交叉注意力、非二次幂 head_dim、每行仅一个有效 key、head 隔离和极端 logits，以检查缩放维度、softmax 轴、mask 语义及数值稳定性。
+NaN 和无穷值不会通过。公开用例覆盖 causal 与 non-causal、自注意力投影和非二次幂 head dimension；完整验证还覆盖单 token、多 batch、多 head、head 隔离、投影方向和极端 logits。
 
 ## 性能说明
 
-平台在计时前完成输入生成和上传，并执行固定次数预热。每个样本由当前 stream 上的一对 CUDA Events 包围若干次 `solve`，报告值会除以内部重复次数。计时包含提交实现产生的全部 GPU 工作与输出分配；不能调用平台禁止的内置 attention、编译器或计时 API 绕过题目。
+平台在计时前生成并上传 `X` 与权重、构造类实例并完成正确性检查和预热。计时区间只包含同一实例的 `forward(X, isCasual)`；每个样本由当前 stream 上的一对 CUDA Events 测量。短用例会在一个计时区间内重复调用并折算为单次耗时。

@@ -67,7 +67,7 @@ def test_torch_versions_compare_with_runtime_profile_as_execution_identity(
 ) -> None:
     runtime_profile = (
         "backend=torch_python",
-        "policy=restricted_torch_v1",
+        "policy=restricted_torch_v2",
         "python=3.11.10",
         "torch=2.5.1",
         "torch_cuda=12.4",

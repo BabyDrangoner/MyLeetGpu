@@ -105,6 +105,14 @@ def test_problem_list_and_detail_expose_all_public_manifests_only(api) -> None:
     assert torch_detail["supported_languages"] == ["torch_python"]
     assert set(torch_detail["implementations"]) == {"torch_python"}
     assert torch_detail["implementations"]["torch_python"]["editor_language"] == "python"
+    assert torch_detail["revision"] == "2"
+    assert torch_detail["signature"]["symbol"] == "MultiHeadAttention"
+    assert [item["name"] for item in torch_detail["types"]["inputs"]] == ["X", "isCasual"]
+
+    gqa_detail = client.get("/api/problems/grouped-query-attention").json()
+    assert gqa_detail["revision"] == "2"
+    assert gqa_detail["signature"]["symbol"] == "GroupedQueryAttention"
+    assert [item["name"] for item in gqa_detail["types"]["inputs"]] == ["X", "isCasual"]
 
 
 def test_unknown_problem_is_404(api) -> None:
@@ -166,7 +174,7 @@ def test_cuda_and_triton_drafts_are_independent_api_resources(api) -> None:
 
 def test_torch_only_problem_defaults_drafts_jobs_and_duplicates_to_torch(api) -> None:
     client, app = api
-    source = "import torch\ndef solve(query, key, value, attention_mask):\n    return query\n"
+    source = app.state.catalog.get("multi-head-attention").starter_code
 
     saved = client.put(
         "/api/drafts/multi-head-attention",
@@ -187,7 +195,7 @@ def test_torch_only_problem_defaults_drafts_jobs_and_duplicates_to_torch(api) ->
         language="torch_python",
         source=source,
         source_digest=source_hash(source),
-        compile_flags=("backend=torch_python", "policy=restricted_torch_v1"),
+        compile_flags=("backend=torch_python", "policy=restricted_torch_v2"),
     )
     duplicate = client.get(
         "/api/versions/duplicates",

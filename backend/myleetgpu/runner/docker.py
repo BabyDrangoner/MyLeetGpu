@@ -27,7 +27,12 @@ from myleetgpu.runner.models import (
     RunnerUnhealthy,
 )
 from myleetgpu.runner.submission_policy import POLICY_VERSION as TRITON_POLICY_VERSION
-from myleetgpu.runner.torch_submission_policy import POLICY_VERSION as TORCH_POLICY_VERSION
+from myleetgpu.runner.torch_submission_policy import (
+    POLICY_VERSION as TORCH_POLICY_VERSION,
+)
+from myleetgpu.runner.torch_submission_policy import (
+    submission_contract_from_declaration,
+)
 
 RESULT_PREFIX = "MYLEETGPU_RESULT="
 CONTAINER_USER = "65534:65534"
@@ -669,6 +674,20 @@ class DockerRunner:
         language: RunnerLanguage,
         implementation: Any | None,
     ) -> CompileResult:
+        policy_arguments = [f"/work/{TRITON_POLICY_FILENAME}", "/work/source.py"]
+        if language == TORCH_PYTHON:
+            owner = (
+                implementation
+                if implementation is not None
+                else problem.get_implementation(TORCH_PYTHON)
+            )
+            contract = submission_contract_from_declaration(
+                owner.signature.symbol,
+                owner.signature.declaration,
+            )
+            policy_arguments.append(
+                json.dumps(contract, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+            )
         # Refuse Docker's implicit pull path. The optional runtime must be
         # provisioned deliberately, and its absence must not trip CUDA health.
         self._inspect_image_digest(self.settings.triton_image)
@@ -694,8 +713,7 @@ class DockerRunner:
             self.settings.triton_image,
             "-I",
             "-B",
-            f"/work/{TRITON_POLICY_FILENAME}",
-            "/work/source.py",
+            *policy_arguments,
         ]
         timeout = min(
             self.settings.compile_timeout_seconds,

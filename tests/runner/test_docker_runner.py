@@ -568,7 +568,7 @@ def test_torch_compile_uses_no_gpu_readonly_source_and_shared_pinned_image(
     assert isinstance(args, list)
     assert "--gpus" not in args
     assert option_value(args, "--mount").endswith("dst=/work,readonly")
-    assert args[-7:] == [
+    assert args[-8:-1] == [
         "--entrypoint",
         "python",
         settings.triton_image,
@@ -577,6 +577,18 @@ def test_torch_compile_uses_no_gpu_readonly_source_and_shared_pinned_image(
         f"/work/{TRITON_POLICY_FILENAME}",
         "/work/source.py",
     ]
+    assert json.loads(args[-1]) == {
+        "forward_parameters": ["X", "isCasual"],
+        "init_parameters": [
+            "numHeads",
+            "qWeight",
+            "kWeight",
+            "vWeight",
+            "outputWeight",
+        ],
+        "kind": "class",
+        "symbol": "MultiHeadAttention",
+    }
     assert captured["timeout"] == torch_problem.manifest.timeouts.compile_ms / 1000
     assert captured["platform_owned"] is False
 
@@ -1396,7 +1408,7 @@ def test_torch_build_config_records_policy_toolchain_and_architecture(
 
     assert flags == [
         "backend=torch_python",
-        "policy=restricted_torch_v1",
+        "policy=restricted_torch_v2",
         "python=3.11.11",
         "torch=2.5.1+cu124",
         "torch_cuda=12.4",

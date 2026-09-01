@@ -1,17 +1,55 @@
 import torch
 
 
-def solve(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: torch.Tensor,
-) -> torch.Tensor:
-    repeats_per_group = query.shape[1] // key.shape[1]
-    grouped_key = torch.repeat_interleave(key, repeats_per_group, dim=1)
-    grouped_value = torch.repeat_interleave(value, repeats_per_group, dim=1)
-    scale = query.shape[-1] ** -0.5
-    scores = torch.matmul(query, grouped_key.transpose(-2, -1)) * scale
-    masked_scores = scores.masked_fill(~attention_mask, float("-inf"))
-    weights = torch.softmax(masked_scores, dim=-1)
-    return torch.matmul(weights, grouped_value)
+class GroupedQueryAttention:
+    def __init__(
+        self,
+        numQueryHeads: int,
+        numKeyValueHeads: int,
+        qWeight: torch.Tensor,
+        kWeight: torch.Tensor,
+        vWeight: torch.Tensor,
+        outputWeight: torch.Tensor,
+    ):
+        self.numQueryHeads = numQueryHeads
+        self.numKeyValueHeads = numKeyValueHeads
+        self.qWeight = qWeight
+        self.kWeight = kWeight
+        self.vWeight = vWeight
+        self.outputWeight = outputWeight
+
+    def forward(self, X: torch.Tensor, isCasual: bool) -> torch.Tensor:
+        batchSize, sequenceLength, embeddingDim = X.shape
+        headDim = embeddingDim // self.numQueryHeads
+        keyValueDim = self.numKeyValueHeads * headDim
+
+        query = torch.matmul(X, self.qWeight)
+        key = torch.matmul(X, self.kWeight)
+        value = torch.matmul(X, self.vWeight)
+
+        query = query.reshape(batchSize, sequenceLength, self.numQueryHeads, headDim).transpose(
+            1, 2
+        )
+        key = key.reshape(batchSize, sequenceLength, self.numKeyValueHeads, headDim).transpose(1, 2)
+        value = value.reshape(batchSize, sequenceLength, self.numKeyValueHeads, headDim).transpose(
+            1, 2
+        )
+
+        repeatsPerGroup = self.numQueryHeads // self.numKeyValueHeads
+        groupedKey = torch.repeat_interleave(key, repeatsPerGroup, dim=1)
+        groupedValue = torch.repeat_interleave(value, repeatsPerGroup, dim=1)
+
+        scores = torch.matmul(query, groupedKey.transpose(-2, -1)) * (headDim**-0.5)
+        if isCasual:
+            positions = torch.arange(sequenceLength, device=X.device)
+            causalMask = positions.unsqueeze(0) <= positions.unsqueeze(1)
+            scores = scores.masked_fill(~causalMask, float("-inf"))
+
+        probabilities = torch.softmax(scores, dim=-1)
+        context = torch.matmul(probabilities, groupedValue)
+        merged = (
+            context.transpose(1, 2)
+            .contiguous()
+            .reshape(batchSize, sequenceLength, keyValueDim * repeatsPerGroup)
+        )
+        return torch.matmul(merged, self.outputWeight)

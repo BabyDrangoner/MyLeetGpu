@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { installMockApi, starterSource, torchStarterSource, tritonStarterSource } from './mock-api'
+import { gqaTorchStarterSource, installMockApi, starterSource, torchStarterSource, tritonStarterSource } from './mock-api'
 
 test('loads all eight problems and opens the CUDA workspace', async ({ page }) => {
   await installMockApi(page)
@@ -12,8 +12,8 @@ test('loads all eight problems and opens the CUDA workspace', async ({ page }) =
   await expect(page.getByRole('link', { name: /单精度向量最大值归约/ })).toBeVisible()
   await expect(page.getByRole('link', { name: /逐行 Softmax/ })).toBeVisible()
   await expect(page.getByRole('link', { name: /行主序矩阵乘法/ })).toBeVisible()
-  await expect(page.getByRole('link', { name: /多头注意力/ })).toBeVisible()
-  await expect(page.getByRole('link', { name: /分组查询注意力/ })).toBeVisible()
+  await expect(page.getByRole('link', { name: /多头自注意力/ })).toBeVisible()
+  await expect(page.getByRole('link', { name: /分组查询自注意力/ })).toBeVisible()
   await page.getByRole('link', { name: /向量逐元素相加/ }).click()
 
   await expect(page.getByRole('heading', { name: '向量逐元素相加', level: 1 }).first()).toBeVisible()
@@ -86,18 +86,25 @@ test('switches to Triton with a language-scoped starter, URL and job payload', a
   await expect(page.getByText('solution.cu')).toBeVisible()
 })
 
-test('opens a torch-only attention problem with a language-scoped Python session', async ({ page }) => {
+test('opens both torch-only attention classes with language-scoped Python sessions', async ({ page }) => {
   const state = await installMockApi(page)
   await page.goto('/problems/multi-head-attention?language=cuda_cpp')
 
   await expect(page).toHaveURL(/language=torch_python/)
-  await expect(page.getByRole('heading', { name: '多头注意力', level: 1 }).first()).toBeVisible()
+  await expect(page.getByRole('heading', { name: '多头自注意力', level: 1 }).first()).toBeVisible()
   await expect(page.getByText('solution.py')).toBeVisible()
   await expect(page.getByRole('button', { name: 'PyTorch (Python)' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'CUDA C++' })).toHaveCount(0)
+  await expect(page.locator('.signature-block code')).toContainText('class MultiHeadAttention')
   await page.getByRole('button', { name: '代码检查' }).click()
   await expect(page.getByText('PyTorch 代码检查失败')).toBeVisible()
   expect(state.submittedJobs.at(-1)).toMatchObject({ action: 'compile', language: 'torch_python', source: torchStarterSource })
+
+  await page.goto('/problems/grouped-query-attention')
+  await expect(page.getByRole('heading', { name: '分组查询自注意力', level: 1 }).first()).toBeVisible()
+  await expect(page.locator('.signature-block code')).toContainText('class GroupedQueryAttention')
+  await page.getByRole('button', { name: '代码检查' }).click()
+  expect(state.submittedJobs.at(-1)).toMatchObject({ action: 'compile', language: 'torch_python', source: gqaTorchStarterSource })
 })
 
 test('shows the independently probed Triton toolchain environment', async ({ page }) => {
