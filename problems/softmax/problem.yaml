@@ -1,8 +1,8 @@
 schema_version: 2
-slug: reduction
-title: 单精度向量求和归约
+slug: softmax
+title: 二维张量逐行 Softmax
 difficulty: medium
-revision: 2
+revision: 1
 default_language: cuda_cpp
 
 implementations:
@@ -13,7 +13,7 @@ implementations:
     signature:
       header: include/solve.h
       symbol: solve
-      declaration: "void solve(const float* input, float* output, int n, cudaStream_t stream)"
+      declaration: "void solve(const float* input, float* output, int rows, int cols, cudaStream_t stream)"
     harness:
       validator: harness/validator.cu
       benchmark: harness/benchmark.cu
@@ -33,7 +33,7 @@ implementations:
     statement_appendix: instructions/triton_python.md
     signature:
       symbol: solve
-      declaration: "def solve(input: torch.Tensor, output: torch.Tensor, n: int) -> None"
+      declaration: "def solve(input: torch.Tensor, output: torch.Tensor, rows: int, cols: int) -> None"
     harness:
       validator: triton/harness/validator.py
       benchmark: triton/harness/benchmark.py
@@ -46,72 +46,103 @@ types:
   inputs:
     - name: input
       type: float32
-      shape: [n]
+      shape: [rows, cols]
+      layout: row_major
       memory: device
       access: read_only
-    - name: n
+    - name: rows
+      type: int32
+      memory: host_value
+    - name: cols
       type: int32
       memory: host_value
   outputs:
     - name: output
       type: float32
-      shape: [1]
+      shape: [rows, cols]
+      layout: row_major
       memory: device
       access: write_only
 
 constraints:
-  n:
+  rows:
     min: 1
+    max: 65536
+  cols:
+    min: 1
+    max: 4096
+  elements:
     max: 16777216
   values:
     finite: true
-    min: -1.0
-    max: 1.0
+    min: -100.0
+    max: 100.0
   aliasing: none
 
 tolerance:
   mode: float
-  atol: 0.02
-  rtol: 0.00005
+  atol: 0.00003
+  rtol: 0.0003
   nan_equal: false
   infinity: same_sign
 
 public:
-  seed: 57721
+  seed: 4242
   timeout_ms: 5000
   cases:
     - name: sample_1
-      n: 1
-      pattern: edge
+      rows: 1
+      cols: 1
+      pattern: singleton
     - name: sample_2
-      n: 1000
-      pattern: alternating
+      rows: 3
+      cols: 5
+      pattern: sequence
 
 internal:
-  seeds: [112358, 271828]
-  timeout_ms: 15000
+  seeds: [424242, 8675309]
+  timeout_ms: 30000
   cases:
-    - n: 31
-      pattern: alternating
-    - n: 4097
-      pattern: signed_random
-    - n: 65537
-      pattern: ones
-    - n: 1048576
-      pattern: signed_random
+    - rows: 7
+      cols: 31
+      pattern: random
+    - rows: 257
+      cols: 3
+      pattern: extreme
+    - rows: 19
+      cols: 257
+      pattern: repeated
+    - rows: 64
+      cols: 4096
+      pattern: extreme
+    - rows: 1024
+      cols: 513
+      pattern: random
+    - rows: 65536
+      cols: 1
+      pattern: singleton
+    - rows: 4096
+      cols: 4095
+      pattern: random
 
 benchmark:
   protocol_version: "1"
-  suite_seed: 20240517
+  suite_seed: 20240901
   sizes:
-    - label: 64K
-      n: 65536
-      inner_repetitions: 64
-    - label: 1M
-      n: 1048576
+    - label: 8192x128
+      rows: 8192
+      cols: 128
+      elements: 1048576
       inner_repetitions: 16
-    - label: 16M
-      n: 16777216
+    - label: 4096x1024
+      rows: 4096
+      cols: 1024
+      elements: 4194304
+      inner_repetitions: 8
+    - label: 2048x4096
+      rows: 2048
+      cols: 4096
+      elements: 8388608
       inner_repetitions: 4
   warmup: 8
   iterations: 20
@@ -120,5 +151,5 @@ benchmark:
 timeouts:
   compile_ms: 30000
   public_ms: 5000
-  validation_ms: 15000
+  validation_ms: 30000
   benchmark_ms: 90000

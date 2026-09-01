@@ -9,6 +9,7 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -17,8 +18,9 @@
 
 namespace {
 
-constexpr float kAtol = 0.02F;
-constexpr float kRtol = 0.00005F;
+constexpr float kAbsoluteTolerance = 3.0e-5F;
+constexpr float kRelativeTolerance = 3.0e-4F;
+constexpr double kRowSumTolerance = 1.0e-3;
 
 void cuda_check(cudaError_t status) {
     if (status != cudaSuccess) throw std::runtime_error(cudaGetErrorString(status));
@@ -51,9 +53,10 @@ private:
 
 struct TestCase {
     std::string name;
-    int n;
+    int rows;
+    int cols;
     std::uint32_t seed;
-    int pattern;
+    std::string pattern;
     bool internal;
 };
 
@@ -86,61 +89,124 @@ std::string json_string(const std::string& value) {
     return out.str();
 }
 
-bool close_enough(float actual, float expected) {
-    if (std::isnan(actual) || std::isnan(expected)) return false;
-    if (std::isinf(actual) || std::isinf(expected)) return actual == expected;
-    return std::fabs(actual - expected) <=
-           kAtol + kRtol * std::fabs(expected);
+std::vector<float> make_input(const TestCase& test) {
+    const std::size_t count =
+        static_cast<std::size_t>(test.rows) * static_cast<std::size_t>(test.cols);
+    std::vector<float> input(count);
+    std::mt19937 generator(test.seed);
+    std::uniform_real_distribution<float> distribution(-100.0F, 100.0F);
+    for (int row = 0; row < test.rows; ++row) {
+        for (int col = 0; col < test.cols; ++col) {
+            const std::size_t index = static_cast<std::size_t>(row) * test.cols + col;
+            if (test.pattern == "singleton") {
+                input[index] = 37.0F;
+            } else if (test.pattern == "sequence") {
+                input[index] = 0.5F * static_cast<float>(
+                    static_cast<int>((index * 17U + static_cast<std::size_t>(row) * 3U) % 29U)
+                    - 14);
+            } else if (test.pattern == "random") {
+                input[index] = distribution(generator);
+            } else if (test.pattern == "repeated") {
+                input[index] = static_cast<float>((row % 17) - 8) * 12.5F;
+            } else {
+                switch (col % 6) {
+                    case 0: input[index] = 100.0F - 0.125F * (row % 5); break;
+                    case 1: input[index] = -100.0F; break;
+                    case 2: input[index] = 80.0F; break;
+                    case 3: input[index] = -80.0F; break;
+                    case 4: input[index] = 0.0F; break;
+                    default: input[index] = 99.0F - 0.25F * (row % 3); break;
+                }
+            }
+        }
+    }
+    return input;
+}
+
+std::vector<float> reference_softmax(const std::vector<float>& input,
+                                     int rows,
+                                     int cols) {
+    std::vector<float> expected(input.size());
+    for (int row = 0; row < rows; ++row) {
+        const std::size_t row_offset = static_cast<std::size_t>(row) * cols;
+        double row_max = -std::numeric_limits<double>::infinity();
+        for (int col = 0; col < cols; ++col) {
+            row_max = std::max(row_max, static_cast<double>(input[row_offset + col]));
+        }
+        double denominator = 0.0;
+        for (int col = 0; col < cols; ++col) {
+            denominator += std::exp(static_cast<double>(input[row_offset + col]) - row_max);
+        }
+        for (int col = 0; col < cols; ++col) {
+            expected[row_offset + col] = static_cast<float>(
+                std::exp(static_cast<double>(input[row_offset + col]) - row_max) /
+                denominator);
+        }
+    }
+    return expected;
+}
+
+bool close_float(float actual, float expected) {
+    if (!std::isfinite(actual)) return false;
+    const float threshold =
+        kAbsoluteTolerance + kRelativeTolerance * std::fabs(expected);
+    return std::fabs(actual - expected) <= threshold;
 }
 
 CaseResult run_case(const TestCase& test, cudaStream_t stream) {
-    const std::size_t count = static_cast<std::size_t>(test.n);
+    const std::size_t count =
+        static_cast<std::size_t>(test.rows) * static_cast<std::size_t>(test.cols);
     const std::size_t bytes = count * sizeof(float);
-    std::vector<float> input(count);
+    const std::vector<float> input = make_input(test);
     std::vector<float> observed_input(count);
-    std::mt19937 generator(test.seed);
-    std::uniform_real_distribution<float> distribution(-1.0F, 1.0F);
-    for (int i = 0; i < test.n; ++i) {
-        float value = 0.0F;
-        if (test.pattern == 0) {
-            value = -0.75F;
-        } else if (test.pattern == 1) {
-            const float magnitude = static_cast<float>((i % 19) + 1) / 19.0F;
-            value = (i % 2 == 0) ? magnitude : -magnitude;
-        } else if (test.pattern == 2) {
-            value = 1.0F;
-        } else {
-            value = distribution(generator);
-        }
-        input[static_cast<std::size_t>(i)] = value;
-    }
-    double reference = 0.0;
-    for (const float value : input) reference += static_cast<double>(value);
-    const float expected = static_cast<float>(reference);
-    float actual = 0.0F;
+    const std::vector<float> expected = reference_softmax(input, test.rows, test.cols);
+    std::vector<float> actual(count, 0.0F);
 
     DeviceBuffer<float> device_input(count);
-    DeviceBuffer<float> device_output(1);
-    const float output_poison = 1024.0F;
+    DeviceBuffer<float> device_output(count);
     cuda_check(cudaMemcpyAsync(device_input.get(), input.data(), bytes,
                                cudaMemcpyHostToDevice, stream));
-    cuda_check(cudaMemcpyAsync(device_output.get(), &output_poison, sizeof(float),
-                               cudaMemcpyHostToDevice, stream));
+    cuda_check(cudaMemsetAsync(device_output.get(), 0xFF, bytes, stream));
     cudaGetLastError();
-    solve(device_input.get(), device_output.get(), test.n, stream);
+    solve(device_input.get(), device_output.get(), test.rows, test.cols, stream);
     cuda_check(cudaGetLastError());
-    cuda_check(cudaMemcpyAsync(&actual, device_output.get(), sizeof(float),
+    cuda_check(cudaMemcpyAsync(actual.data(), device_output.get(), bytes,
                                cudaMemcpyDeviceToHost, stream));
     cuda_check(cudaMemcpyAsync(observed_input.data(), device_input.get(), bytes,
                                cudaMemcpyDeviceToHost, stream));
     cuda_check(cudaStreamSynchronize(stream));
+
     if (std::memcmp(observed_input.data(), input.data(), bytes) != 0) {
         return {test.name, false,
                 test.internal ? "input modified" : "input must remain unchanged"};
     }
-    if (!close_enough(actual, expected)) {
-        return {test.name, false,
-                test.internal ? "output mismatch" : "sum does not match reference"};
+
+    for (std::size_t index = 0; index < count; ++index) {
+        if (!close_float(actual[index], expected[index])) {
+            if (test.internal) return {test.name, false, "output mismatch"};
+            const int row = static_cast<int>(index / static_cast<std::size_t>(test.cols));
+            const int col = static_cast<int>(index % static_cast<std::size_t>(test.cols));
+            return {test.name, false,
+                    "output mismatch at row " + std::to_string(row) +
+                        ", col " + std::to_string(col)};
+        }
+    }
+    for (int row = 0; row < test.rows; ++row) {
+        double row_sum = 0.0;
+        for (int col = 0; col < test.cols; ++col) {
+            const float value = actual[static_cast<std::size_t>(row) * test.cols + col];
+            if (value < 0.0F) {
+                return {test.name, false,
+                        test.internal ? "output mismatch"
+                                      : "output contains a negative probability"};
+            }
+            row_sum += static_cast<double>(value);
+        }
+        if (std::fabs(row_sum - 1.0) > kRowSumTolerance) {
+            return {test.name, false,
+                    test.internal ? "output mismatch"
+                                  : "row probabilities do not sum to one"};
+        }
     }
     return {test.name, true, ""};
 }
@@ -183,14 +249,17 @@ int main(int argc, char** argv) {
     }
 
     std::vector<TestCase> tests = {
-        {"sample_1", 1, 57721U, 0, false},
-        {"sample_2", 1000, 57721U, 1, false},
+        {"sample_1", 1, 1, 4242U, "singleton", false},
+        {"sample_2", 3, 5, 4242U, "sequence", false},
     };
     if (!public_only) {
-        tests.push_back({"internal_case_1", 31, 112358U, 1, true});
-        tests.push_back({"internal_case_2", 4097, 112358U, 3, true});
-        tests.push_back({"internal_case_3", 65537, 271828U, 2, true});
-        tests.push_back({"internal_case_4", 1048576, 271828U, 3, true});
+        tests.push_back({"internal_case_1", 7, 31, 424242U, "random", true});
+        tests.push_back({"internal_case_2", 257, 3, 424242U, "extreme", true});
+        tests.push_back({"internal_case_3", 19, 257, 8675309U, "repeated", true});
+        tests.push_back({"internal_case_4", 64, 4096, 8675309U, "extreme", true});
+        tests.push_back({"internal_case_5", 1024, 513, 424242U, "random", true});
+        tests.push_back({"internal_case_6", 65536, 1, 8675309U, "singleton", true});
+        tests.push_back({"internal_case_7", 4096, 4095, 8675309U, "random", true});
     }
 
     std::vector<CaseResult> results;

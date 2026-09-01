@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import math
 import os
 import sys
 from dataclasses import dataclass
@@ -13,8 +12,8 @@ from typing import Any
 import torch
 
 RESULT_PREFIX = "MYLEETGPU_RESULT="
-ATOL = 0.02
-RTOL = 0.00005
+ATOL = 0.03
+RTOL = 0.005
 
 
 class SubmissionCompileError(RuntimeError):
@@ -41,6 +40,8 @@ def public_error(prefix: str, error: BaseException) -> str:
 @dataclass(frozen=True)
 class TestCase:
     name: str
+    m: int
+    k: int
     n: int
     seed: int
     pattern: str
@@ -57,48 +58,62 @@ def load_submission() -> ModuleType:
     spec.loader.exec_module(policy)
     return policy.load_submission(
         source_path,
-        expected_parameters=("input", "output", "n"),
+        expected_parameters=("a", "b", "c", "m", "k", "n"),
     )
 
 
-def make_input(test: TestCase) -> torch.Tensor:
-    if test.pattern == "edge":
-        return torch.full((test.n,), -0.75, dtype=torch.float32)
-    if test.pattern == "alternating":
-        indexes = torch.arange(test.n, dtype=torch.int64)
-        magnitude = (indexes.remainder(19) + 1).to(torch.float32) / 19.0
-        return torch.where(indexes.remainder(2) == 0, magnitude, -magnitude)
-    if test.pattern == "ones":
-        return torch.ones(test.n, dtype=torch.float32)
+def make_inputs(test: TestCase) -> tuple[torch.Tensor, torch.Tensor]:
+    a_count = test.m * test.k
+    b_count = test.k * test.n
+    if test.pattern == "sequence":
+        a = ((torch.arange(a_count, dtype=torch.int64).remainder(7) - 3) * 0.25).to(torch.float32)
+        indices = torch.arange(b_count, dtype=torch.int64)
+        b = (((indices * 3).remainder(11) - 5) * 0.2).to(torch.float32)
+        return a, b
     generator = torch.Generator(device="cpu").manual_seed(test.seed)
-    return torch.empty(test.n, dtype=torch.float32).uniform_(-1.0, 1.0, generator=generator)
+    a = torch.empty(a_count, dtype=torch.float32).uniform_(-1.0, 1.0, generator=generator)
+    b = torch.empty(b_count, dtype=torch.float32).uniform_(-1.0, 1.0, generator=generator)
+    return a, b
 
 
-def close_enough(actual: float, expected: float) -> bool:
-    if math.isnan(actual) or math.isnan(expected):
-        return False
-    if math.isinf(actual) or math.isinf(expected):
-        return actual == expected
-    return abs(actual - expected) <= ATOL + RTOL * abs(expected)
+def reference_multiply(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    m: int,
+    k: int,
+    n: int,
+) -> torch.Tensor:
+    return (
+        (a.reshape(m, k).to(torch.float64) @ b.reshape(k, n).to(torch.float64))
+        .to(torch.float32)
+        .reshape(-1)
+    )
 
 
 def run_case(module: ModuleType, test: TestCase, stream: torch.cuda.Stream) -> dict[str, Any]:
-    input_values = make_input(test)
-    expected = float(input_values.to(torch.float64).sum().to(torch.float32).item())
+    a, b = make_inputs(test)
+    expected = reference_multiply(a, b, test.m, test.k, test.n)
     with torch.cuda.stream(stream):
-        device_input = input_values.cuda(non_blocking=False)
-        output = torch.full((1,), 1024.0, device="cuda", dtype=torch.float32)
-        returned = module.solve(device_input, output, test.n)
+        device_a = a.cuda(non_blocking=False)
+        device_b = b.cuda(non_blocking=False)
+        output = torch.full((test.m * test.n,), float("nan"), dtype=torch.float32, device="cuda")
+        returned = module.solve(device_a, device_b, output, test.m, test.k, test.n)
         if returned is not None:
             raise RuntimeError("solve must return None")
     stream.synchronize()
-    if not torch.equal(device_input.cpu().view(torch.int32), input_values.view(torch.int32)):
-        message = "input modified" if test.internal else "input must remain unchanged"
+    a_unchanged = torch.equal(device_a.cpu().view(torch.int32), a.view(torch.int32))
+    b_unchanged = torch.equal(device_b.cpu().view(torch.int32), b.view(torch.int32))
+    if not a_unchanged or not b_unchanged:
+        message = "input modified" if test.internal else "input tensors must remain unchanged"
         return {"name": test.name, "passed": False, "message": message}
-    actual = float(output.cpu()[0].item())
-    if close_enough(actual, expected):
+    actual = output.cpu()
+    if torch.allclose(actual, expected, atol=ATOL, rtol=RTOL, equal_nan=False):
         return {"name": test.name, "passed": True}
-    message = "output mismatch" if test.internal else "sum does not match reference"
+    message = "output mismatch"
+    if not test.internal:
+        close = torch.isclose(actual, expected, atol=ATOL, rtol=RTOL, equal_nan=False)
+        mismatch = int(torch.nonzero(~close, as_tuple=False)[0].item())
+        message = f"output mismatch at flattened index {mismatch}"
     return {"name": test.name, "passed": False, "message": message}
 
 
@@ -128,28 +143,26 @@ def main(argv: list[str]) -> int:
     if len(argv) != 3 or argv[1] != "--mode" or argv[2] not in {"public", "full"}:
         payload = trusted_result_payload(
             "runtime_error",
-            [
-                {
-                    "name": "configuration",
-                    "passed": False,
-                    "message": "invalid arguments",
-                }
-            ],
+            [{"name": "configuration", "passed": False, "message": "invalid arguments"}],
         )
         emit(payload)
         return 2
 
     tests = [
-        TestCase("sample_1", 1, 57721, "edge", False),
-        TestCase("sample_2", 1000, 57721, "alternating", False),
+        TestCase("sample_1", 2, 3, 2, 4242, "sequence", False),
+        TestCase("sample_2", 3, 5, 4, 4242, "sequence", False),
     ]
     if argv[2] == "full":
         tests.extend(
             [
-                TestCase("internal_case_1", 31, 112358, "alternating", True),
-                TestCase("internal_case_2", 4097, 112358, "signed_random", True),
-                TestCase("internal_case_3", 65537, 271828, "ones", True),
-                TestCase("internal_case_4", 1048576, 271828, "signed_random", True),
+                TestCase("internal_case_1", 17, 19, 23, 271828, "random", True),
+                TestCase("internal_case_2", 1, 257, 37, 314159, "random", True),
+                TestCase("internal_case_3", 73, 31, 1, 271828, "random", True),
+                TestCase("internal_case_4", 64, 513, 96, 314159, "random", True),
+                TestCase("internal_case_5", 193, 127, 257, 271828, "random", True),
+                TestCase("internal_case_6", 3, 4096, 5, 314159, "random", True),
+                TestCase("internal_case_7", 4096, 7, 3, 271828, "random", True),
+                TestCase("internal_case_8", 5, 9, 4096, 314159, "random", True),
             ]
         )
 

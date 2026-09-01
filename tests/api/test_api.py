@@ -47,7 +47,7 @@ def test_readiness_distinguishes_database_from_unprobed_runner(api) -> None:
     assert unavailable.json() == {
         "status": "not_ready",
         "database": True,
-        "problems": 5,
+        "problems": 8,
         "runner": "unavailable",
         "worker_active": False,
         "runner_error": "worker has not probed the GPU yet",
@@ -68,11 +68,14 @@ def test_problem_list_and_detail_expose_all_public_manifests_only(api) -> None:
     detail = client.get("/api/problems/reduction")
 
     assert listing.status_code == 200
-    assert listing.json()["total"] == 5
+    assert listing.json()["total"] == 8
     listed_by_slug = {item["slug"]: item for item in listing.json()["items"]}
     assert set(listed_by_slug) == {
         "grouped-query-attention",
+        "matrix-multiplication",
+        "max-reduction",
         "multi-head-attention",
+        "softmax",
         "vector-addition",
         "matrix-transpose",
         "reduction",

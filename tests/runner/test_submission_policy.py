@@ -17,6 +17,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
     [
         ("problems/vector-addition/triton/starter.py", ("a", "b", "output", "n")),
         ("problems/reduction/triton/starter.py", ("input", "output", "n")),
+        ("problems/max-reduction/triton/starter.py", ("input", "output", "n")),
+        (
+            "problems/softmax/triton/starter.py",
+            ("input", "output", "rows", "cols"),
+        ),
+        (
+            "problems/matrix-multiplication/triton/starter.py",
+            ("a", "b", "c", "m", "k", "n"),
+        ),
         (
             "problems/matrix-transpose/triton/starter.py",
             ("input", "output", "rows", "cols"),
@@ -203,6 +212,24 @@ def solve(output: torch.Tensor) -> None:
 
     with pytest.raises(SubmissionPolicyError, match="solve parameters"):
         validate_source(source, expected_parameters=("output", "n"))
+
+
+def test_policy_accepts_next_power_of_two_for_launcher_configuration() -> None:
+    source = """
+import torch
+import triton
+import triton.language as tl
+@triton.jit
+def kernel(input, output, n, BLOCK_SIZE: tl.constexpr):
+    offsets = tl.arange(0, BLOCK_SIZE)
+    values = tl.load(input + offsets, mask=offsets < n, other=0.0)
+    tl.store(output + offsets, values, mask=offsets < n)
+def solve(input: torch.Tensor, output: torch.Tensor, n: int) -> None:
+    block_size = triton.next_power_of_2(n)
+    kernel[(1,)](input, output, n, BLOCK_SIZE=block_size)
+"""
+
+    validate_source(source, expected_parameters=("input", "output", "n"))
 
 
 def test_policy_version_is_persistable_comparison_identity() -> None:

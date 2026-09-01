@@ -152,7 +152,17 @@ def test_real_compile_sandbox_has_no_gpu_device(real_runner: DockerRunner) -> No
         real_runner.cleanup_task(task_dir.parent)
 
 
-@pytest.mark.parametrize("slug", ["vector-addition", "matrix-transpose", "reduction"])
+@pytest.mark.parametrize(
+    "slug",
+    [
+        "vector-addition",
+        "matrix-transpose",
+        "reduction",
+        "max-reduction",
+        "softmax",
+        "matrix-multiplication",
+    ],
+)
 def test_real_runner_compiles_and_fully_validates_each_builtin_problem(
     real_runner: DockerRunner,
     problem_catalog: ProblemCatalog,
@@ -275,7 +285,17 @@ def solve(a: torch.Tensor, b: torch.Tensor, output: torch.Tensor, n: int) -> Non
         real_runner.cleanup_task(task_root)
 
 
-@pytest.mark.parametrize("slug", ["vector-addition", "matrix-transpose", "reduction"])
+@pytest.mark.parametrize(
+    "slug",
+    [
+        "vector-addition",
+        "matrix-transpose",
+        "reduction",
+        "max-reduction",
+        "softmax",
+        "matrix-multiplication",
+    ],
+)
 def test_real_runner_fully_validates_each_triton_starter(
     real_runner: DockerRunner,
     problem_catalog: ProblemCatalog,
@@ -301,13 +321,24 @@ def test_real_runner_fully_validates_each_triton_starter(
         assert result.succeeded, result.output
         assert result.parsed is not None
         assert result.parsed["status"] == "passed"
-        assert result.parsed["summary"] == {"total": 6, "passed": 6, "failed": 0}
+        total = len(problem.manifest.public.cases) + len(problem.manifest.internal.cases)
+        assert result.parsed["summary"] == {"total": total, "passed": total, "failed": 0}
     finally:
         real_runner.cleanup_task(task_root)
 
 
-@pytest.mark.parametrize("slug", ["vector-addition", "matrix-transpose", "reduction"])
-def test_real_runner_collects_twenty_event_samples_for_each_triton_problem(
+@pytest.mark.parametrize(
+    "slug",
+    [
+        "vector-addition",
+        "matrix-transpose",
+        "reduction",
+        "max-reduction",
+        "softmax",
+        "matrix-multiplication",
+    ],
+)
+def test_real_runner_collects_event_samples_for_each_triton_problem(
     real_runner: DockerRunner,
     problem_catalog: ProblemCatalog,
     slug: str,

@@ -9,6 +9,7 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -16,9 +17,6 @@
 #include <vector>
 
 namespace {
-
-constexpr float kAtol = 0.02F;
-constexpr float kRtol = 0.00005F;
 
 void cuda_check(cudaError_t status) {
     if (status != cudaSuccess) throw std::runtime_error(cudaGetErrorString(status));
@@ -86,42 +84,45 @@ std::string json_string(const std::string& value) {
     return out.str();
 }
 
-bool close_enough(float actual, float expected) {
-    if (std::isnan(actual) || std::isnan(expected)) return false;
-    if (std::isinf(actual) || std::isinf(expected)) return actual == expected;
-    return std::fabs(actual - expected) <=
-           kAtol + kRtol * std::fabs(expected);
+std::vector<float> make_input(const TestCase& test) {
+    std::vector<float> input(static_cast<std::size_t>(test.n));
+    std::mt19937 generator(test.seed);
+    if (test.pattern == 0) {
+        std::fill(input.begin(), input.end(), std::numeric_limits<float>::lowest());
+    } else if (test.pattern == 1) {
+        std::uniform_real_distribution<float> distribution(-1000.0F, -0.001F);
+        for (float& value : input) value = distribution(generator);
+    } else if (test.pattern == 2) {
+        std::uniform_real_distribution<float> distribution(-1000.0F, 1000.0F);
+        for (float& value : input) value = distribution(generator);
+        input.front() = std::numeric_limits<float>::lowest();
+        input[static_cast<std::size_t>(test.n / 2)] =
+            std::numeric_limits<float>::max();
+    } else if (test.pattern == 3) {
+        for (int i = 0; i < test.n; ++i) {
+            const float magnitude = static_cast<float>((i % 257) + 1);
+            input[static_cast<std::size_t>(i)] =
+                (i % 2 == 0) ? -magnitude : magnitude;
+        }
+    } else if (test.pattern == 4) {
+        std::fill(input.begin(), input.end(), -0.0F);
+    } else {
+        std::uniform_real_distribution<float> distribution(-1000000.0F, 1000000.0F);
+        for (float& value : input) value = distribution(generator);
+    }
+    return input;
 }
 
 CaseResult run_case(const TestCase& test, cudaStream_t stream) {
-    const std::size_t count = static_cast<std::size_t>(test.n);
-    const std::size_t bytes = count * sizeof(float);
-    std::vector<float> input(count);
-    std::vector<float> observed_input(count);
-    std::mt19937 generator(test.seed);
-    std::uniform_real_distribution<float> distribution(-1.0F, 1.0F);
-    for (int i = 0; i < test.n; ++i) {
-        float value = 0.0F;
-        if (test.pattern == 0) {
-            value = -0.75F;
-        } else if (test.pattern == 1) {
-            const float magnitude = static_cast<float>((i % 19) + 1) / 19.0F;
-            value = (i % 2 == 0) ? magnitude : -magnitude;
-        } else if (test.pattern == 2) {
-            value = 1.0F;
-        } else {
-            value = distribution(generator);
-        }
-        input[static_cast<std::size_t>(i)] = value;
-    }
-    double reference = 0.0;
-    for (const float value : input) reference += static_cast<double>(value);
-    const float expected = static_cast<float>(reference);
+    std::vector<float> input = make_input(test);
+    std::vector<float> observed_input(input.size());
+    const float expected = *std::max_element(input.begin(), input.end());
+    const std::size_t bytes = input.size() * sizeof(float);
     float actual = 0.0F;
 
-    DeviceBuffer<float> device_input(count);
+    DeviceBuffer<float> device_input(input.size());
     DeviceBuffer<float> device_output(1);
-    const float output_poison = 1024.0F;
+    const float output_poison = std::numeric_limits<float>::max();
     cuda_check(cudaMemcpyAsync(device_input.get(), input.data(), bytes,
                                cudaMemcpyHostToDevice, stream));
     cuda_check(cudaMemcpyAsync(device_output.get(), &output_poison, sizeof(float),
@@ -138,9 +139,9 @@ CaseResult run_case(const TestCase& test, cudaStream_t stream) {
         return {test.name, false,
                 test.internal ? "input modified" : "input must remain unchanged"};
     }
-    if (!close_enough(actual, expected)) {
+    if (std::isnan(actual) || actual != expected) {
         return {test.name, false,
-                test.internal ? "output mismatch" : "sum does not match reference"};
+                test.internal ? "output mismatch" : "maximum does not match reference"};
     }
     return {test.name, true, ""};
 }
@@ -183,14 +184,15 @@ int main(int argc, char** argv) {
     }
 
     std::vector<TestCase> tests = {
-        {"sample_1", 1, 57721U, 0, false},
-        {"sample_2", 1000, 57721U, 1, false},
+        {"sample_1", 1, 91453U, 0, false},
+        {"sample_2", 1000, 91453U, 1, false},
     };
     if (!public_only) {
-        tests.push_back({"internal_case_1", 31, 112358U, 1, true});
-        tests.push_back({"internal_case_2", 4097, 112358U, 3, true});
-        tests.push_back({"internal_case_3", 65537, 271828U, 2, true});
-        tests.push_back({"internal_case_4", 1048576, 271828U, 3, true});
+        tests.push_back({"internal_case_1", 31, 161803U, 2, true});
+        tests.push_back({"internal_case_2", 4097, 161803U, 1, true});
+        tests.push_back({"internal_case_3", 65537, 141421U, 3, true});
+        tests.push_back({"internal_case_4", 513, 141421U, 4, true});
+        tests.push_back({"internal_case_5", 1048576, 141421U, 5, true});
     }
 
     std::vector<CaseResult> results;

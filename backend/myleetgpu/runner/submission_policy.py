@@ -42,7 +42,7 @@ _FORBIDDEN_NAMES = {
     "type",
     "vars",
 }
-_TRITON_HOST_CALLS = {"cdiv"}
+_TRITON_HOST_CALLS = {"cdiv", "next_power_of_2"}
 _TL_CALLS = {
     "abs",
     "advance",

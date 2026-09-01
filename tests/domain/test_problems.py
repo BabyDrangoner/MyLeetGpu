@@ -13,7 +13,14 @@ from pydantic import ValidationError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PROBLEMS_ROOT = PROJECT_ROOT / "problems"
-KERNEL_SLUGS = {"vector-addition", "matrix-transpose", "reduction"}
+KERNEL_SLUGS = {
+    "matrix-multiplication",
+    "matrix-transpose",
+    "max-reduction",
+    "reduction",
+    "softmax",
+    "vector-addition",
+}
 TORCH_SLUGS = {"multi-head-attention", "grouped-query-attention"}
 EXPECTED_SLUGS = KERNEL_SLUGS | TORCH_SLUGS
 
@@ -27,9 +34,39 @@ def load_raw_manifest(slug: str = "vector-addition") -> dict[str, object]:
     return yaml.safe_load((PROBLEMS_ROOT / slug / "problem.yaml").read_text(encoding="utf-8"))
 
 
-def test_catalog_loads_all_five_builtin_original_problems(catalog: ProblemCatalog) -> None:
-    assert len(catalog) == 5
+def test_catalog_loads_all_eight_builtin_original_problems(catalog: ProblemCatalog) -> None:
+    assert len(catalog) == 8
     assert {problem.manifest.slug for problem in catalog.list()} == EXPECTED_SLUGS
+
+
+def test_new_kernel_protocols_cover_their_defining_operations_and_boundaries(
+    catalog: ProblemCatalog,
+) -> None:
+    reduction = catalog.get("reduction")
+    maximum = catalog.get("max-reduction")
+    softmax = catalog.get("softmax")
+    matmul = catalog.get("matrix-multiplication")
+
+    assert reduction.manifest.revision == "2"
+    assert "tl.sum" in reduction.get_implementation("triton_python").starter_code
+
+    assert maximum.manifest.tolerance.atol == 0.0
+    assert maximum.manifest.tolerance.rtol == 0.0
+    assert {case["pattern"] for case in maximum.manifest.internal.cases} >= {
+        "all_negative",
+        "extremes",
+        "signed_zero",
+    }
+    assert "tl.atomic_max" in maximum.get_implementation("triton_python").starter_code
+
+    softmax_cases = softmax.manifest.internal.cases
+    assert any(case["rows"] == 65536 and case["cols"] == 1 for case in softmax_cases)
+    assert any(case["rows"] * case["cols"] >= 16_000_000 for case in softmax_cases)
+    assert "triton.next_power_of_2" in softmax.get_implementation("triton_python").starter_code
+
+    matmul_cases = matmul.manifest.internal.cases
+    assert all(any(case[axis] == 4096 for case in matmul_cases) for axis in ("m", "k", "n"))
+    assert "tl.dot" in matmul.get_implementation("triton_python").starter_code
 
 
 @pytest.mark.parametrize("slug", sorted(KERNEL_SLUGS))

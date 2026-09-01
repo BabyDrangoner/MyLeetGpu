@@ -13,8 +13,6 @@ from typing import Any
 import torch
 
 RESULT_PREFIX = "MYLEETGPU_RESULT="
-ATOL = 0.02
-RTOL = 0.00005
 
 
 class SubmissionCompileError(RuntimeError):
@@ -62,32 +60,39 @@ def load_submission() -> ModuleType:
 
 
 def make_input(test: TestCase) -> torch.Tensor:
-    if test.pattern == "edge":
-        return torch.full((test.n,), -0.75, dtype=torch.float32)
+    if test.pattern == "extreme_low":
+        return torch.full((test.n,), torch.finfo(torch.float32).min, dtype=torch.float32)
+    generator = torch.Generator(device="cpu").manual_seed(test.seed)
+    if test.pattern == "all_negative":
+        return torch.empty(test.n, dtype=torch.float32).uniform_(
+            -1000.0, -0.001, generator=generator
+        )
+    if test.pattern == "extremes":
+        values = torch.empty(test.n, dtype=torch.float32).uniform_(
+            -1000.0, 1000.0, generator=generator
+        )
+        values[0] = torch.finfo(torch.float32).min
+        values[test.n // 2] = torch.finfo(torch.float32).max
+        return values
     if test.pattern == "alternating":
         indexes = torch.arange(test.n, dtype=torch.int64)
-        magnitude = (indexes.remainder(19) + 1).to(torch.float32) / 19.0
-        return torch.where(indexes.remainder(2) == 0, magnitude, -magnitude)
-    if test.pattern == "ones":
-        return torch.ones(test.n, dtype=torch.float32)
-    generator = torch.Generator(device="cpu").manual_seed(test.seed)
-    return torch.empty(test.n, dtype=torch.float32).uniform_(-1.0, 1.0, generator=generator)
-
-
-def close_enough(actual: float, expected: float) -> bool:
-    if math.isnan(actual) or math.isnan(expected):
-        return False
-    if math.isinf(actual) or math.isinf(expected):
-        return actual == expected
-    return abs(actual - expected) <= ATOL + RTOL * abs(expected)
+        magnitude = (indexes.remainder(257) + 1).to(torch.float32)
+        return torch.where(indexes.remainder(2) == 0, -magnitude, magnitude)
+    if test.pattern == "signed_zero":
+        return torch.full((test.n,), -0.0, dtype=torch.float32)
+    return torch.empty(test.n, dtype=torch.float32).uniform_(
+        -1000000.0, 1000000.0, generator=generator
+    )
 
 
 def run_case(module: ModuleType, test: TestCase, stream: torch.cuda.Stream) -> dict[str, Any]:
     input_values = make_input(test)
-    expected = float(input_values.to(torch.float64).sum().to(torch.float32).item())
+    expected = float(input_values.max().item())
     with torch.cuda.stream(stream):
         device_input = input_values.cuda(non_blocking=False)
-        output = torch.full((1,), 1024.0, device="cuda", dtype=torch.float32)
+        output = torch.full(
+            (1,), torch.finfo(torch.float32).max, device="cuda", dtype=torch.float32
+        )
         returned = module.solve(device_input, output, test.n)
         if returned is not None:
             raise RuntimeError("solve must return None")
@@ -96,9 +101,9 @@ def run_case(module: ModuleType, test: TestCase, stream: torch.cuda.Stream) -> d
         message = "input modified" if test.internal else "input must remain unchanged"
         return {"name": test.name, "passed": False, "message": message}
     actual = float(output.cpu()[0].item())
-    if close_enough(actual, expected):
+    if not math.isnan(actual) and actual == expected:
         return {"name": test.name, "passed": True}
-    message = "output mismatch" if test.internal else "sum does not match reference"
+    message = "output mismatch" if test.internal else "maximum does not match reference"
     return {"name": test.name, "passed": False, "message": message}
 
 
@@ -128,28 +133,23 @@ def main(argv: list[str]) -> int:
     if len(argv) != 3 or argv[1] != "--mode" or argv[2] not in {"public", "full"}:
         payload = trusted_result_payload(
             "runtime_error",
-            [
-                {
-                    "name": "configuration",
-                    "passed": False,
-                    "message": "invalid arguments",
-                }
-            ],
+            [{"name": "configuration", "passed": False, "message": "invalid arguments"}],
         )
         emit(payload)
         return 2
 
     tests = [
-        TestCase("sample_1", 1, 57721, "edge", False),
-        TestCase("sample_2", 1000, 57721, "alternating", False),
+        TestCase("sample_1", 1, 91453, "extreme_low", False),
+        TestCase("sample_2", 1000, 91453, "all_negative", False),
     ]
     if argv[2] == "full":
         tests.extend(
             [
-                TestCase("internal_case_1", 31, 112358, "alternating", True),
-                TestCase("internal_case_2", 4097, 112358, "signed_random", True),
-                TestCase("internal_case_3", 65537, 271828, "ones", True),
-                TestCase("internal_case_4", 1048576, 271828, "signed_random", True),
+                TestCase("internal_case_1", 31, 161803, "extremes", True),
+                TestCase("internal_case_2", 4097, 161803, "all_negative", True),
+                TestCase("internal_case_3", 65537, 141421, "alternating", True),
+                TestCase("internal_case_4", 513, 141421, "signed_zero", True),
+                TestCase("internal_case_5", 1048576, 141421, "signed_random", True),
             ]
         )
 

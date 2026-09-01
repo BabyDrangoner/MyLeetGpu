@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import math
 import os
 import sys
 from dataclasses import dataclass
@@ -13,8 +12,9 @@ from typing import Any
 import torch
 
 RESULT_PREFIX = "MYLEETGPU_RESULT="
-ATOL = 0.02
-RTOL = 0.00005
+ABSOLUTE_TOLERANCE = 3.0e-5
+RELATIVE_TOLERANCE = 3.0e-4
+ROW_SUM_TOLERANCE = 1.0e-3
 
 
 class SubmissionCompileError(RuntimeError):
@@ -41,7 +41,8 @@ def public_error(prefix: str, error: BaseException) -> str:
 @dataclass(frozen=True)
 class TestCase:
     name: str
-    n: int
+    rows: int
+    cols: int
     seed: int
     pattern: str
     internal: bool
@@ -57,48 +58,80 @@ def load_submission() -> ModuleType:
     spec.loader.exec_module(policy)
     return policy.load_submission(
         source_path,
-        expected_parameters=("input", "output", "n"),
+        expected_parameters=("input", "output", "rows", "cols"),
     )
 
 
 def make_input(test: TestCase) -> torch.Tensor:
-    if test.pattern == "edge":
-        return torch.full((test.n,), -0.75, dtype=torch.float32)
-    if test.pattern == "alternating":
-        indexes = torch.arange(test.n, dtype=torch.int64)
-        magnitude = (indexes.remainder(19) + 1).to(torch.float32) / 19.0
-        return torch.where(indexes.remainder(2) == 0, magnitude, -magnitude)
-    if test.pattern == "ones":
-        return torch.ones(test.n, dtype=torch.float32)
-    generator = torch.Generator(device="cpu").manual_seed(test.seed)
-    return torch.empty(test.n, dtype=torch.float32).uniform_(-1.0, 1.0, generator=generator)
-
-
-def close_enough(actual: float, expected: float) -> bool:
-    if math.isnan(actual) or math.isnan(expected):
-        return False
-    if math.isinf(actual) or math.isinf(expected):
-        return actual == expected
-    return abs(actual - expected) <= ATOL + RTOL * abs(expected)
+    count = test.rows * test.cols
+    if test.pattern == "singleton":
+        return torch.full((count,), 37.0, dtype=torch.float32)
+    if test.pattern == "sequence":
+        indices = torch.arange(count, dtype=torch.int64)
+        rows = torch.div(indices, test.cols, rounding_mode="floor")
+        return ((indices * 17 + rows * 3).remainder(29) - 14).to(torch.float32) * 0.5
+    if test.pattern == "random":
+        generator = torch.Generator(device="cpu").manual_seed(test.seed)
+        return torch.empty(count, dtype=torch.float32).uniform_(-100.0, 100.0, generator=generator)
+    row_indices = torch.arange(test.rows, dtype=torch.int64).repeat_interleave(test.cols)
+    if test.pattern == "repeated":
+        return ((row_indices.remainder(17) - 8).to(torch.float32) * 12.5).contiguous()
+    col_indices = torch.arange(test.cols, dtype=torch.int64).repeat(test.rows)
+    values = torch.zeros(count, dtype=torch.float32)
+    selector = col_indices.remainder(6)
+    values[selector == 0] = 100.0 - 0.125 * row_indices[selector == 0].remainder(5)
+    values[selector == 1] = -100.0
+    values[selector == 2] = 80.0
+    values[selector == 3] = -80.0
+    values[selector == 4] = 0.0
+    values[selector == 5] = 99.0 - 0.25 * row_indices[selector == 5].remainder(3)
+    return values
 
 
 def run_case(module: ModuleType, test: TestCase, stream: torch.cuda.Stream) -> dict[str, Any]:
     input_values = make_input(test)
-    expected = float(input_values.to(torch.float64).sum().to(torch.float32).item())
+    expected = (
+        torch.softmax(input_values.reshape(test.rows, test.cols).to(torch.float64), dim=1)
+        .to(torch.float32)
+        .reshape(-1)
+    )
     with torch.cuda.stream(stream):
         device_input = input_values.cuda(non_blocking=False)
-        output = torch.full((1,), 1024.0, device="cuda", dtype=torch.float32)
-        returned = module.solve(device_input, output, test.n)
+        output = torch.full_like(device_input, float("nan"))
+        returned = module.solve(device_input, output, test.rows, test.cols)
         if returned is not None:
             raise RuntimeError("solve must return None")
     stream.synchronize()
     if not torch.equal(device_input.cpu().view(torch.int32), input_values.view(torch.int32)):
         message = "input modified" if test.internal else "input must remain unchanged"
         return {"name": test.name, "passed": False, "message": message}
-    actual = float(output.cpu()[0].item())
-    if close_enough(actual, expected):
+    actual = output.cpu()
+    matches = torch.isfinite(actual) & torch.isclose(
+        actual,
+        expected,
+        rtol=RELATIVE_TOLERANCE,
+        atol=ABSOLUTE_TOLERANCE,
+    )
+    actual_rows = actual.reshape(test.rows, test.cols)
+    nonnegative = bool((actual_rows >= 0.0).all())
+    normalized = bool(
+        torch.isclose(
+            actual_rows.to(torch.float64).sum(dim=1),
+            torch.ones(test.rows, dtype=torch.float64),
+            rtol=0.0,
+            atol=ROW_SUM_TOLERANCE,
+        ).all()
+    )
+    if bool(matches.all()) and nonnegative and normalized:
         return {"name": test.name, "passed": True}
-    message = "output mismatch" if test.internal else "sum does not match reference"
+    message = "output mismatch"
+    if not test.internal:
+        if not bool(matches.all()):
+            mismatch = int(torch.nonzero(~matches, as_tuple=False)[0].item())
+            row, col = divmod(mismatch, test.cols)
+            message = f"output mismatch at row {row}, col {col}"
+        else:
+            message = "row probabilities must be non-negative and sum to one"
     return {"name": test.name, "passed": False, "message": message}
 
 
@@ -128,28 +161,25 @@ def main(argv: list[str]) -> int:
     if len(argv) != 3 or argv[1] != "--mode" or argv[2] not in {"public", "full"}:
         payload = trusted_result_payload(
             "runtime_error",
-            [
-                {
-                    "name": "configuration",
-                    "passed": False,
-                    "message": "invalid arguments",
-                }
-            ],
+            [{"name": "configuration", "passed": False, "message": "invalid arguments"}],
         )
         emit(payload)
         return 2
 
     tests = [
-        TestCase("sample_1", 1, 57721, "edge", False),
-        TestCase("sample_2", 1000, 57721, "alternating", False),
+        TestCase("sample_1", 1, 1, 4242, "singleton", False),
+        TestCase("sample_2", 3, 5, 4242, "sequence", False),
     ]
     if argv[2] == "full":
         tests.extend(
             [
-                TestCase("internal_case_1", 31, 112358, "alternating", True),
-                TestCase("internal_case_2", 4097, 112358, "signed_random", True),
-                TestCase("internal_case_3", 65537, 271828, "ones", True),
-                TestCase("internal_case_4", 1048576, 271828, "signed_random", True),
+                TestCase("internal_case_1", 7, 31, 424242, "random", True),
+                TestCase("internal_case_2", 257, 3, 424242, "extreme", True),
+                TestCase("internal_case_3", 19, 257, 8675309, "repeated", True),
+                TestCase("internal_case_4", 64, 4096, 8675309, "extreme", True),
+                TestCase("internal_case_5", 1024, 513, 424242, "random", True),
+                TestCase("internal_case_6", 65536, 1, 8675309, "singleton", True),
+                TestCase("internal_case_7", 4096, 4095, 8675309, "random", True),
             ]
         )
 

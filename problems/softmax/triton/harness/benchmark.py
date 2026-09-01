@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import math
 import os
 import sys
 from pathlib import Path
@@ -15,9 +14,14 @@ RESULT_PREFIX = "MYLEETGPU_RESULT="
 PROTOCOL_VERSION = "1"
 WARMUP = 8
 ITERATIONS = 20
-ATOL = 0.02
-RTOL = 0.00005
-CASES = (("64K", 65536, 64), ("1M", 1048576, 16), ("16M", 16777216, 4))
+ABSOLUTE_TOLERANCE = 3.0e-5
+RELATIVE_TOLERANCE = 3.0e-4
+ROW_SUM_TOLERANCE = 1.0e-3
+CASES = (
+    ("8192x128", 8192, 128, 16),
+    ("4096x1024", 4096, 1024, 8),
+    ("2048x4096", 2048, 4096, 4),
+)
 
 
 class SubmissionCompileError(RuntimeError):
@@ -43,42 +47,64 @@ def load_submission() -> ModuleType:
     spec.loader.exec_module(policy)
     return policy.load_submission(
         source_path,
-        expected_parameters=("input", "output", "n"),
+        expected_parameters=("input", "output", "rows", "cols"),
     )
-
-
-def close_enough(actual: float, expected: float) -> bool:
-    if math.isnan(actual) or math.isnan(expected):
-        return False
-    if math.isinf(actual) or math.isinf(expected):
-        return actual == expected
-    return abs(actual - expected) <= ATOL + RTOL * abs(expected)
 
 
 def run_benchmark(
     module: ModuleType,
     label: str,
-    n: int,
+    rows: int,
+    cols: int,
     inner_repetitions: int,
     generator: torch.Generator,
     stream: torch.cuda.Stream,
 ) -> dict[str, Any]:
-    input_values = torch.empty(n, dtype=torch.float32).uniform_(0.0, 1.0, generator=generator)
-    expected = float(input_values.to(torch.float64).sum().to(torch.float32).item())
+    count = rows * cols
+    input_values = torch.empty(count, dtype=torch.float32).uniform_(
+        -20.0, 20.0, generator=generator
+    )
+    expected = (
+        torch.softmax(input_values.reshape(rows, cols).to(torch.float64), dim=1)
+        .to(torch.float32)
+        .reshape(-1)
+    )
     with torch.cuda.stream(stream):
         device_input = input_values.cuda(non_blocking=False)
-        output = torch.full((1,), 1024.0, device="cuda", dtype=torch.float32)
+        output = torch.full_like(device_input, float("nan"))
     stream.synchronize()
 
     with torch.cuda.stream(stream):
         for _ in range(WARMUP * inner_repetitions):
-            returned = module.solve(device_input, output, n)
+            returned = module.solve(device_input, output, rows, cols)
             if returned is not None:
                 raise RuntimeError("solve must return None")
     stream.synchronize()
     if not torch.equal(device_input.cpu().view(torch.int32), input_values.view(torch.int32)):
         raise RuntimeError("input was modified")
-    if not close_enough(float(output.cpu()[0].item()), expected):
+    actual = output.cpu()
+    actual_rows = actual.reshape(rows, cols)
+    elementwise = bool(
+        (
+            torch.isfinite(actual)
+            & torch.isclose(
+                actual,
+                expected,
+                rtol=RELATIVE_TOLERANCE,
+                atol=ABSOLUTE_TOLERANCE,
+            )
+        ).all()
+    )
+    nonnegative = bool((actual_rows >= 0.0).all())
+    normalized = bool(
+        torch.isclose(
+            actual_rows.to(torch.float64).sum(dim=1),
+            torch.ones(rows, dtype=torch.float64),
+            rtol=0.0,
+            atol=ROW_SUM_TOLERANCE,
+        ).all()
+    )
+    if not (elementwise and nonnegative and normalized):
         raise RuntimeError("correctness check failed before timing")
 
     start = torch.cuda.Event(enable_timing=True)
@@ -88,14 +114,14 @@ def run_benchmark(
         with torch.cuda.stream(stream):
             start.record(stream)
             for _ in range(inner_repetitions):
-                returned = module.solve(device_input, output, n)
+                returned = module.solve(device_input, output, rows, cols)
                 if returned is not None:
                     raise RuntimeError("solve must return None")
             stop.record(stream)
         stop.synchronize()
         samples.append(float(start.elapsed_time(stop)) / inner_repetitions)
     return {
-        "size": n,
+        "size": count,
         "label": label,
         "samples_ms": samples,
         "inner_repetitions": inner_repetitions,
@@ -129,12 +155,12 @@ def main(argv: list[str]) -> int:
         torch.cuda.set_device(0)
         module = trusted_load_submission()
         stream = torch.cuda.Stream(device=0)
-        generator = torch.Generator(device="cpu").manual_seed(20240517)
+        generator = torch.Generator(device="cpu").manual_seed(20240901)
         measurements = [
-            trusted_run_benchmark(module, label, n, repetitions, generator, stream)
-            for label, n, repetitions in CASES
+            trusted_run_benchmark(module, label, rows, cols, repetitions, generator, stream)
+            for label, rows, cols, repetitions in CASES
         ]
-        payload = {
+        payload: dict[str, Any] = {
             "status": "passed",
             "measurements": measurements,
             "protocol_version": PROTOCOL_VERSION,

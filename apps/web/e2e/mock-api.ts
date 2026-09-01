@@ -68,7 +68,10 @@ const environment = {
 const problems = [
   { slug: 'vector-addition', title: '向量逐元素相加', difficulty: 'easy', revision: '1', summary: '实现高吞吐的逐元素相加。', languages: ['cuda_cpp', 'triton_python'] },
   { slug: 'matrix-transpose', title: '行主序矩阵转置', difficulty: 'medium', revision: '1', summary: '使用共享内存完成矩阵转置。', languages: ['cuda_cpp', 'triton_python'] },
-  { slug: 'reduction', title: '单精度向量求和归约', difficulty: 'hard', revision: '1', summary: '实现稳定的并行归约。', languages: ['cuda_cpp', 'triton_python'] },
+  { slug: 'reduction', title: '单精度向量求和归约', difficulty: 'medium', revision: '2', summary: '实现稳定的并行归约。', languages: ['cuda_cpp', 'triton_python'] },
+  { slug: 'max-reduction', title: '单精度向量最大值归约', difficulty: 'medium', revision: '1', summary: '并行求出向量中的最大值。', languages: ['cuda_cpp', 'triton_python'] },
+  { slug: 'softmax', title: '逐行 Softmax', difficulty: 'medium', revision: '1', summary: '实现数值稳定的逐行 Softmax。', languages: ['cuda_cpp', 'triton_python'] },
+  { slug: 'matrix-multiplication', title: '行主序矩阵乘法', difficulty: 'medium', revision: '1', summary: '实现行主序矩阵乘法。', languages: ['cuda_cpp', 'triton_python'] },
   { slug: 'multi-head-attention', title: '多头注意力', difficulty: 'medium', revision: '1', summary: '使用 PyTorch 张量操作实现多头注意力。', languages: ['torch_python'] },
   { slug: 'grouped-query-attention', title: '分组查询注意力', difficulty: 'hard', revision: '1', summary: '使用 PyTorch 实现 GQA 的分组键值共享。', languages: ['torch_python'] },
 ]

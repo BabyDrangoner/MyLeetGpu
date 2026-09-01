@@ -221,13 +221,13 @@ make stop
 
 ### 5.1 选择题目与编辑代码
 
-1. 在题目列表选择当前五道内置题之一：Vector Addition、Matrix Transpose 和 Reduction 分别提供 CUDA C++ 与 Triton (Python) starter；多头缩放点积注意力（MHA）和分组查询注意力（GQA）提供 PyTorch (Python) starter。
+1. 在题目列表选择当前八道内置题之一：Vector Addition、Matrix Transpose、Sum Reduction、Max Reduction、Softmax 和 Matrix Multiplication 分别提供 CUDA C++ 与 Triton (Python) starter；多头缩放点积注意力（MHA）和分组查询注意力（GQA）提供 PyTorch (Python) starter。
 2. 用编辑器顶部的语言切换器选择当前题目支持的实现。URL 会保留 `language=cuda_cpp`、`language=triton_python` 或 `language=torch_python`，刷新和进入性能页时仍能回到同一语言；语言切换器不会显示当前题目没有声明的实现。
 3. 阅读当前语言的函数签名、补充说明、约束和浮点容差，只实现 starter 要求的 `solve` 接口。CUDA 不要自行提供 `main`；Triton 可以定义多个 `@triton.jit` Kernel，但必须保留可调用的 Python `solve(...)`；PyTorch 只定义题目指定签名的高层 Tensor 函数并返回结果 Tensor。两种 Python 实现都必须遵守题面列出的受限语法。
 4. 在 Monaco Editor 中编辑 `.cu` 或 `.py`。编辑器会分别保存当前题目、当前语言的草稿。
 5. “重置代码”只会把当前语言的编辑内容恢复为该 revision 的 starter；确认前检查是否仍需要未保存修改。
 
-Triton `solve` 接收 GPU 0 上连续存放的 `torch.float32` Tensor 和题目声明的标量参数。平台已经进入受控的 `torch.cuda.stream(stream)` 上下文；直接把 Kernel launch 到当前 stream，写入平台提供的输出 Tensor，并返回 `None`。`solve` 只能做字面量/标量 launch 参数计算、`triton.cdiv`、当前文件 JIT Kernel launch，以及 Reduction 题明确允许的 `output.zero_()`；不要把 Tensor 移到 CPU、替换输出、调用设备级同步或依赖默认 stream。每道题的 Triton 补充说明会显示准确签名和白名单边界。
+Triton `solve` 接收 GPU 0 上连续存放的 `torch.float32` Tensor 和题目声明的标量参数。平台已经进入受控的 `torch.cuda.stream(stream)` 上下文；直接把 Kernel launch 到当前 stream，写入平台提供的输出 Tensor，并返回 `None`。`solve` 只能做字面量/标量 launch 参数计算、`triton.cdiv`、`triton.next_power_of_2`、当前文件 JIT Kernel launch，以及 Sum Reduction 题明确允许的 `output.zero_()`；不要把 Tensor 移到 CPU、替换输出、调用设备级同步或依赖默认 stream。每道题的 Triton 补充说明会显示准确签名和白名单边界。
 
 PyTorch 的 MHA/GQA 题不要求编写自定义 Kernel，而是练习用 `reshape`/`transpose`、矩阵乘法、mask、softmax 和 GQA 所需的 head 分组等白名单 Tensor 运算组合 attention。`solve(query, key, value, attention_mask)` 接收 GPU 0 上的连续 Tensor，平台已进入受控的 `torch.cuda.stream(stream)` 和 `torch.inference_mode()` 上下文；必须返回新的 CUDA `torch.float32` Tensor，形状符合题面，且不得修改或别名输入。不要把 Tensor 移到 CPU、显式同步、依赖跨调用状态，或直接调用现成的 scaled-dot-product attention 绕过实现。
 

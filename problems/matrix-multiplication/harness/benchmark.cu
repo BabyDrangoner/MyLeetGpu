@@ -19,11 +19,11 @@
 
 namespace {
 
-constexpr int kWarmup = 8;
-constexpr int kIterations = 20;
+constexpr int kWarmup = 4;
+constexpr int kIterations = 15;
 constexpr const char* kProtocolVersion = "1";
-constexpr float kAtol = 0.02F;
-constexpr float kRtol = 0.00005F;
+constexpr double kAbsoluteTolerance = 0.03;
+constexpr double kRelativeTolerance = 0.005;
 
 void cuda_check(cudaError_t status) {
     if (status != cudaSuccess) throw std::runtime_error(cudaGetErrorString(status));
@@ -67,13 +67,15 @@ private:
 
 struct BenchmarkCase {
     const char* label;
+    int m;
+    int k;
     int n;
     int inner_repetitions;
 };
 
 struct Measurement {
     std::string label;
-    int size;
+    std::int64_t size;
     int inner_repetitions;
     std::vector<double> samples_ms;
     double median_ms;
@@ -103,8 +105,29 @@ std::string json_string(const std::string& value) {
 bool close_enough(float actual, float expected) {
     if (std::isnan(actual) || std::isnan(expected)) return false;
     if (std::isinf(actual) || std::isinf(expected)) return actual == expected;
-    return std::fabs(actual - expected) <=
-           kAtol + kRtol * std::fabs(expected);
+    const double difference = std::abs(static_cast<double>(actual) - expected);
+    return difference <=
+           kAbsoluteTolerance + kRelativeTolerance * std::abs(static_cast<double>(expected));
+}
+
+std::vector<float> reference_multiply(const std::vector<float>& a,
+                                      const std::vector<float>& b,
+                                      int m,
+                                      int k,
+                                      int n) {
+    std::vector<float> expected(static_cast<std::size_t>(m) * n);
+    for (int row = 0; row < m; ++row) {
+        for (int col = 0; col < n; ++col) {
+            double accumulator = 0.0;
+            for (int inner = 0; inner < k; ++inner) {
+                accumulator += static_cast<double>(a[static_cast<std::size_t>(row) * k + inner]) *
+                               static_cast<double>(b[static_cast<std::size_t>(inner) * n + col]);
+            }
+            expected[static_cast<std::size_t>(row) * n + col] =
+                static_cast<float>(accumulator);
+        }
+    }
+    return expected;
 }
 
 Measurement summarize(const BenchmarkCase& benchmark_case,
@@ -125,49 +148,66 @@ Measurement summarize(const BenchmarkCase& benchmark_case,
         squared_error += delta * delta;
     }
     const double deviation = std::sqrt(squared_error / static_cast<double>(count));
-    return {benchmark_case.label, benchmark_case.n,
-            benchmark_case.inner_repetitions, std::move(samples), median,
-            sorted[p95_index], sorted.front(), mean > 0.0 ? deviation / mean : 0.0};
+    const std::int64_t size =
+        static_cast<std::int64_t>(benchmark_case.m) * benchmark_case.k +
+        static_cast<std::int64_t>(benchmark_case.k) * benchmark_case.n +
+        static_cast<std::int64_t>(benchmark_case.m) * benchmark_case.n;
+    return {benchmark_case.label, size, benchmark_case.inner_repetitions,
+            std::move(samples), median, sorted[p95_index], sorted.front(),
+            mean > 0.0 ? deviation / mean : 0.0};
 }
 
 Measurement run_benchmark(const BenchmarkCase& benchmark_case,
                           cudaStream_t stream,
                           std::mt19937& generator) {
-    const std::size_t count = static_cast<std::size_t>(benchmark_case.n);
-    const std::size_t bytes = count * sizeof(float);
-    std::uniform_real_distribution<float> distribution(0.0F, 1.0F);
-    std::vector<float> input(count);
-    std::vector<float> observed_input(count);
-    for (float& value : input) value = distribution(generator);
-    double reference = 0.0;
-    for (const float value : input) reference += static_cast<double>(value);
-    const float expected = static_cast<float>(reference);
+    const std::size_t a_count =
+        static_cast<std::size_t>(benchmark_case.m) * benchmark_case.k;
+    const std::size_t b_count =
+        static_cast<std::size_t>(benchmark_case.k) * benchmark_case.n;
+    const std::size_t c_count =
+        static_cast<std::size_t>(benchmark_case.m) * benchmark_case.n;
+    std::uniform_real_distribution<float> distribution(-1.0F, 1.0F);
+    std::vector<float> a(a_count);
+    std::vector<float> b(b_count);
+    std::vector<float> observed_a(a_count);
+    std::vector<float> observed_b(b_count);
+    std::vector<float> output(c_count);
+    for (float& value : a) value = distribution(generator);
+    for (float& value : b) value = distribution(generator);
+    const std::vector<float> expected = reference_multiply(
+        a, b, benchmark_case.m, benchmark_case.k, benchmark_case.n);
 
-    DeviceBuffer<float> device_input(count);
-    DeviceBuffer<float> device_output(1);
-    const float output_poison = 1024.0F;
-    cuda_check(cudaMemcpyAsync(device_input.get(), input.data(), bytes,
+    DeviceBuffer<float> device_a(a_count);
+    DeviceBuffer<float> device_b(b_count);
+    DeviceBuffer<float> device_c(c_count);
+    cuda_check(cudaMemcpyAsync(device_a.get(), a.data(), a_count * sizeof(float),
                                cudaMemcpyHostToDevice, stream));
-    cuda_check(cudaMemcpyAsync(device_output.get(), &output_poison, sizeof(float),
+    cuda_check(cudaMemcpyAsync(device_b.get(), b.data(), b_count * sizeof(float),
                                cudaMemcpyHostToDevice, stream));
+    cuda_check(cudaMemsetAsync(device_c.get(), 0xFF, c_count * sizeof(float), stream));
     cuda_check(cudaStreamSynchronize(stream));
-    for (int i = 0; i < kWarmup * benchmark_case.inner_repetitions; ++i) {
-        solve(device_input.get(), device_output.get(), benchmark_case.n, stream);
+    for (int repeat = 0; repeat < kWarmup * benchmark_case.inner_repetitions; ++repeat) {
+        solve(device_a.get(), device_b.get(), device_c.get(),
+              benchmark_case.m, benchmark_case.k, benchmark_case.n, stream);
     }
     cuda_check(cudaGetLastError());
     cuda_check(cudaStreamSynchronize(stream));
 
-    float actual = 0.0F;
-    cuda_check(cudaMemcpyAsync(&actual, device_output.get(), sizeof(float),
+    cuda_check(cudaMemcpyAsync(output.data(), device_c.get(), c_count * sizeof(float),
                                cudaMemcpyDeviceToHost, stream));
-    cuda_check(cudaMemcpyAsync(observed_input.data(), device_input.get(), bytes,
+    cuda_check(cudaMemcpyAsync(observed_a.data(), device_a.get(), a_count * sizeof(float),
+                               cudaMemcpyDeviceToHost, stream));
+    cuda_check(cudaMemcpyAsync(observed_b.data(), device_b.get(), b_count * sizeof(float),
                                cudaMemcpyDeviceToHost, stream));
     cuda_check(cudaStreamSynchronize(stream));
-    if (std::memcmp(observed_input.data(), input.data(), bytes) != 0) {
-        throw std::runtime_error("input was modified");
+    if (std::memcmp(observed_a.data(), a.data(), a_count * sizeof(float)) != 0 ||
+        std::memcmp(observed_b.data(), b.data(), b_count * sizeof(float)) != 0) {
+        throw std::runtime_error("input buffers were modified");
     }
-    if (!close_enough(actual, expected)) {
-        throw std::runtime_error("correctness check failed before timing");
+    for (std::size_t index = 0; index < c_count; ++index) {
+        if (!close_enough(output[index], expected[index])) {
+            throw std::runtime_error("correctness check failed before timing");
+        }
     }
 
     Event start;
@@ -176,9 +216,11 @@ Measurement run_benchmark(const BenchmarkCase& benchmark_case,
     samples.reserve(kIterations);
     for (int sample = 0; sample < kIterations; ++sample) {
         cudaGetLastError();
+        cuda_check(cudaMemsetAsync(device_c.get(), 0xFF, c_count * sizeof(float), stream));
         cuda_check(cudaEventRecord(start.get(), stream));
         for (int inner = 0; inner < benchmark_case.inner_repetitions; ++inner) {
-            solve(device_input.get(), device_output.get(), benchmark_case.n, stream);
+            solve(device_a.get(), device_b.get(), device_c.get(),
+                  benchmark_case.m, benchmark_case.k, benchmark_case.n, stream);
         }
         cuda_check(cudaGetLastError());
         cuda_check(cudaEventRecord(stop.get(), stream));
@@ -187,6 +229,23 @@ Measurement run_benchmark(const BenchmarkCase& benchmark_case,
         cuda_check(cudaEventElapsedTime(&elapsed_ms, start.get(), stop.get()));
         samples.push_back(static_cast<double>(elapsed_ms) /
                           static_cast<double>(benchmark_case.inner_repetitions));
+
+        cuda_check(cudaMemcpyAsync(output.data(), device_c.get(), c_count * sizeof(float),
+                                   cudaMemcpyDeviceToHost, stream));
+        cuda_check(cudaMemcpyAsync(observed_a.data(), device_a.get(), a_count * sizeof(float),
+                                   cudaMemcpyDeviceToHost, stream));
+        cuda_check(cudaMemcpyAsync(observed_b.data(), device_b.get(), b_count * sizeof(float),
+                                   cudaMemcpyDeviceToHost, stream));
+        cuda_check(cudaStreamSynchronize(stream));
+        if (std::memcmp(observed_a.data(), a.data(), a_count * sizeof(float)) != 0 ||
+            std::memcmp(observed_b.data(), b.data(), b_count * sizeof(float)) != 0) {
+            throw std::runtime_error("input buffers were modified during timing");
+        }
+        for (std::size_t index = 0; index < c_count; ++index) {
+            if (!close_enough(output[index], expected[index])) {
+                throw std::runtime_error("correctness check failed during timing");
+            }
+        }
     }
     return summarize(benchmark_case, std::move(samples));
 }
@@ -195,15 +254,15 @@ void print_success(const std::vector<Measurement>& measurements) {
     std::ostringstream out;
     out << std::fixed << std::setprecision(6);
     out << "MYLEETGPU_RESULT={\"status\":\"passed\",\"measurements\":[";
-    for (std::size_t i = 0; i < measurements.size(); ++i) {
-        if (i != 0) out << ',';
-        const Measurement& value = measurements[i];
+    for (std::size_t index = 0; index < measurements.size(); ++index) {
+        if (index != 0) out << ',';
+        const Measurement& value = measurements[index];
         out << "{\"size\":" << value.size
             << ",\"label\":" << json_string(value.label)
             << ",\"samples_ms\":[";
-        for (std::size_t j = 0; j < value.samples_ms.size(); ++j) {
-            if (j != 0) out << ',';
-            out << value.samples_ms[j];
+        for (std::size_t sample = 0; sample < value.samples_ms.size(); ++sample) {
+            if (sample != 0) out << ',';
+            out << value.samples_ms[sample];
         }
         out << "],\"median_ms\":" << value.median_ms
             << ",\"p95_ms\":" << value.p95_ms
@@ -226,14 +285,14 @@ void print_error(const std::string& message) {
 
 int main() {
     const std::vector<BenchmarkCase> cases = {
-        {"64K", 65536, 64},
-        {"1M", 1048576, 16},
-        {"16M", 16777216, 4},
+        {"128x128x128", 128, 128, 128, 1},
+        {"256x256x256", 256, 256, 256, 1},
+        {"512x512x512", 512, 512, 512, 1},
     };
     try {
         cuda_check(cudaFree(nullptr));
         Stream stream;
-        std::mt19937 generator(20240517U);
+        std::mt19937 generator(987654U);
         std::vector<Measurement> measurements;
         measurements.reserve(cases.size());
         for (const BenchmarkCase& benchmark_case : cases) {

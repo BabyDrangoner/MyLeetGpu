@@ -12,7 +12,7 @@ MyLeetGpu 是一个在 Windows + WSL2 + NVIDIA GPU 上运行的本地 GPU 编程
 
 ### 2.1 目标
 
-- 提供简体中文的桌面端 Web 界面，浏览五道原创 GPU 题目：三道 CUDA C++ / Triton 算子题，以及使用 PyTorch (Python) 的多头注意力（MHA）和分组查询注意力（GQA）。
+- 提供简体中文的桌面端 Web 界面，浏览八道原创 GPU 题目：六道 CUDA C++ / Triton Kernel 题，以及使用 PyTorch (Python) 的多头注意力（MHA）和分组查询注意力（GQA）。
 - 使用 Monaco Editor 编辑语言对应的 `solve` 接口，支持语言切换、starter code、重置以及按语言隔离的浏览器/服务端草稿自动保存。
 - 严格区分“编译”“运行公开样例”“完整验证”和“保存为性能版本”。
 - 显示经过清理和限长的 NVCC、Triton/PyTorch 提交策略、JIT、运行错误、错误答案、超时及 stdout/stderr 诊断。

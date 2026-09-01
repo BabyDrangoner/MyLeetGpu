@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import { installMockApi, starterSource, torchStarterSource, tritonStarterSource } from './mock-api'
 
-test('loads all five problems and opens the CUDA workspace', async ({ page }) => {
+test('loads all eight problems and opens the CUDA workspace', async ({ page }) => {
   await installMockApi(page)
   await page.goto('/problems')
 
@@ -9,6 +9,9 @@ test('loads all five problems and opens the CUDA workspace', async ({ page }) =>
   await expect(page.getByRole('link', { name: /向量逐元素相加/ })).toBeVisible()
   await expect(page.getByRole('link', { name: /行主序矩阵转置/ })).toBeVisible()
   await expect(page.getByRole('link', { name: /单精度向量求和归约/ })).toBeVisible()
+  await expect(page.getByRole('link', { name: /单精度向量最大值归约/ })).toBeVisible()
+  await expect(page.getByRole('link', { name: /逐行 Softmax/ })).toBeVisible()
+  await expect(page.getByRole('link', { name: /行主序矩阵乘法/ })).toBeVisible()
   await expect(page.getByRole('link', { name: /多头注意力/ })).toBeVisible()
   await expect(page.getByRole('link', { name: /分组查询注意力/ })).toBeVisible()
   await page.getByRole('link', { name: /向量逐元素相加/ }).click()

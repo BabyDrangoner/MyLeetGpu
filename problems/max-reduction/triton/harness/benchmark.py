@@ -15,8 +15,6 @@ RESULT_PREFIX = "MYLEETGPU_RESULT="
 PROTOCOL_VERSION = "1"
 WARMUP = 8
 ITERATIONS = 20
-ATOL = 0.02
-RTOL = 0.00005
 CASES = (("64K", 65536, 64), ("1M", 1048576, 16), ("16M", 16777216, 4))
 
 
@@ -47,14 +45,6 @@ def load_submission() -> ModuleType:
     )
 
 
-def close_enough(actual: float, expected: float) -> bool:
-    if math.isnan(actual) or math.isnan(expected):
-        return False
-    if math.isinf(actual) or math.isinf(expected):
-        return actual == expected
-    return abs(actual - expected) <= ATOL + RTOL * abs(expected)
-
-
 def run_benchmark(
     module: ModuleType,
     label: str,
@@ -63,11 +53,13 @@ def run_benchmark(
     generator: torch.Generator,
     stream: torch.cuda.Stream,
 ) -> dict[str, Any]:
-    input_values = torch.empty(n, dtype=torch.float32).uniform_(0.0, 1.0, generator=generator)
-    expected = float(input_values.to(torch.float64).sum().to(torch.float32).item())
+    input_values = torch.empty(n, dtype=torch.float32).uniform_(-1.0, 1.0, generator=generator)
+    expected = float(input_values.max().item())
     with torch.cuda.stream(stream):
         device_input = input_values.cuda(non_blocking=False)
-        output = torch.full((1,), 1024.0, device="cuda", dtype=torch.float32)
+        output = torch.full(
+            (1,), torch.finfo(torch.float32).max, device="cuda", dtype=torch.float32
+        )
     stream.synchronize()
 
     with torch.cuda.stream(stream):
@@ -78,7 +70,8 @@ def run_benchmark(
     stream.synchronize()
     if not torch.equal(device_input.cpu().view(torch.int32), input_values.view(torch.int32)):
         raise RuntimeError("input was modified")
-    if not close_enough(float(output.cpu()[0].item()), expected):
+    actual = float(output.cpu()[0].item())
+    if math.isnan(actual) or actual != expected:
         raise RuntimeError("correctness check failed before timing")
 
     start = torch.cuda.Event(enable_timing=True)
@@ -129,7 +122,7 @@ def main(argv: list[str]) -> int:
         torch.cuda.set_device(0)
         module = trusted_load_submission()
         stream = torch.cuda.Stream(device=0)
-        generator = torch.Generator(device="cpu").manual_seed(20240517)
+        generator = torch.Generator(device="cpu").manual_seed(20240519)
         measurements = [
             trusted_run_benchmark(module, label, n, repetitions, generator, stream)
             for label, n, repetitions in CASES

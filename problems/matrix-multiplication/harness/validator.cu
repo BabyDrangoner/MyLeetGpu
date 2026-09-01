@@ -17,8 +17,8 @@
 
 namespace {
 
-constexpr float kAtol = 0.02F;
-constexpr float kRtol = 0.00005F;
+constexpr double kAbsoluteTolerance = 0.03;
+constexpr double kRelativeTolerance = 0.005;
 
 void cuda_check(cudaError_t status) {
     if (status != cudaSuccess) throw std::runtime_error(cudaGetErrorString(status));
@@ -51,9 +51,11 @@ private:
 
 struct TestCase {
     std::string name;
+    int m;
+    int k;
     int n;
     std::uint32_t seed;
-    int pattern;
+    bool sequence;
     bool internal;
 };
 
@@ -89,58 +91,94 @@ std::string json_string(const std::string& value) {
 bool close_enough(float actual, float expected) {
     if (std::isnan(actual) || std::isnan(expected)) return false;
     if (std::isinf(actual) || std::isinf(expected)) return actual == expected;
-    return std::fabs(actual - expected) <=
-           kAtol + kRtol * std::fabs(expected);
+    const double difference = std::abs(static_cast<double>(actual) - expected);
+    return difference <=
+           kAbsoluteTolerance + kRelativeTolerance * std::abs(static_cast<double>(expected));
+}
+
+void make_inputs(const TestCase& test,
+                 std::vector<float>& a,
+                 std::vector<float>& b) {
+    if (test.sequence) {
+        for (std::size_t index = 0; index < a.size(); ++index) {
+            a[index] = static_cast<float>(static_cast<int>(index % 7U) - 3) * 0.25F;
+        }
+        for (std::size_t index = 0; index < b.size(); ++index) {
+            b[index] = static_cast<float>(static_cast<int>((index * 3U) % 11U) - 5) * 0.2F;
+        }
+        return;
+    }
+    std::mt19937 generator(test.seed);
+    std::uniform_real_distribution<float> distribution(-1.0F, 1.0F);
+    for (float& value : a) value = distribution(generator);
+    for (float& value : b) value = distribution(generator);
+}
+
+std::vector<float> reference_multiply(const std::vector<float>& a,
+                                      const std::vector<float>& b,
+                                      int m,
+                                      int k,
+                                      int n) {
+    std::vector<float> expected(static_cast<std::size_t>(m) * n);
+    for (int row = 0; row < m; ++row) {
+        for (int col = 0; col < n; ++col) {
+            double accumulator = 0.0;
+            for (int inner = 0; inner < k; ++inner) {
+                accumulator += static_cast<double>(a[static_cast<std::size_t>(row) * k + inner]) *
+                               static_cast<double>(b[static_cast<std::size_t>(inner) * n + col]);
+            }
+            expected[static_cast<std::size_t>(row) * n + col] =
+                static_cast<float>(accumulator);
+        }
+    }
+    return expected;
 }
 
 CaseResult run_case(const TestCase& test, cudaStream_t stream) {
-    const std::size_t count = static_cast<std::size_t>(test.n);
-    const std::size_t bytes = count * sizeof(float);
-    std::vector<float> input(count);
-    std::vector<float> observed_input(count);
-    std::mt19937 generator(test.seed);
-    std::uniform_real_distribution<float> distribution(-1.0F, 1.0F);
-    for (int i = 0; i < test.n; ++i) {
-        float value = 0.0F;
-        if (test.pattern == 0) {
-            value = -0.75F;
-        } else if (test.pattern == 1) {
-            const float magnitude = static_cast<float>((i % 19) + 1) / 19.0F;
-            value = (i % 2 == 0) ? magnitude : -magnitude;
-        } else if (test.pattern == 2) {
-            value = 1.0F;
-        } else {
-            value = distribution(generator);
-        }
-        input[static_cast<std::size_t>(i)] = value;
-    }
-    double reference = 0.0;
-    for (const float value : input) reference += static_cast<double>(value);
-    const float expected = static_cast<float>(reference);
-    float actual = 0.0F;
+    const std::size_t a_count = static_cast<std::size_t>(test.m) * test.k;
+    const std::size_t b_count = static_cast<std::size_t>(test.k) * test.n;
+    const std::size_t c_count = static_cast<std::size_t>(test.m) * test.n;
+    std::vector<float> a(a_count);
+    std::vector<float> b(b_count);
+    std::vector<float> observed_a(a_count);
+    std::vector<float> observed_b(b_count);
+    std::vector<float> actual(c_count, 0.0F);
+    make_inputs(test, a, b);
+    const std::vector<float> expected = reference_multiply(a, b, test.m, test.k, test.n);
 
-    DeviceBuffer<float> device_input(count);
-    DeviceBuffer<float> device_output(1);
-    const float output_poison = 1024.0F;
-    cuda_check(cudaMemcpyAsync(device_input.get(), input.data(), bytes,
+    DeviceBuffer<float> device_a(a_count);
+    DeviceBuffer<float> device_b(b_count);
+    DeviceBuffer<float> device_c(c_count);
+    cuda_check(cudaMemcpyAsync(device_a.get(), a.data(), a_count * sizeof(float),
                                cudaMemcpyHostToDevice, stream));
-    cuda_check(cudaMemcpyAsync(device_output.get(), &output_poison, sizeof(float),
+    cuda_check(cudaMemcpyAsync(device_b.get(), b.data(), b_count * sizeof(float),
                                cudaMemcpyHostToDevice, stream));
+    cuda_check(cudaMemsetAsync(device_c.get(), 0xFF, c_count * sizeof(float), stream));
     cudaGetLastError();
-    solve(device_input.get(), device_output.get(), test.n, stream);
+    solve(device_a.get(), device_b.get(), device_c.get(),
+          test.m, test.k, test.n, stream);
     cuda_check(cudaGetLastError());
-    cuda_check(cudaMemcpyAsync(&actual, device_output.get(), sizeof(float),
+    cuda_check(cudaMemcpyAsync(actual.data(), device_c.get(), c_count * sizeof(float),
                                cudaMemcpyDeviceToHost, stream));
-    cuda_check(cudaMemcpyAsync(observed_input.data(), device_input.get(), bytes,
+    cuda_check(cudaMemcpyAsync(observed_a.data(), device_a.get(), a_count * sizeof(float),
+                               cudaMemcpyDeviceToHost, stream));
+    cuda_check(cudaMemcpyAsync(observed_b.data(), device_b.get(), b_count * sizeof(float),
                                cudaMemcpyDeviceToHost, stream));
     cuda_check(cudaStreamSynchronize(stream));
-    if (std::memcmp(observed_input.data(), input.data(), bytes) != 0) {
+
+    if (std::memcmp(observed_a.data(), a.data(), a_count * sizeof(float)) != 0 ||
+        std::memcmp(observed_b.data(), b.data(), b_count * sizeof(float)) != 0) {
         return {test.name, false,
-                test.internal ? "input modified" : "input must remain unchanged"};
+                test.internal ? "input modified" : "input buffers must remain unchanged"};
     }
-    if (!close_enough(actual, expected)) {
-        return {test.name, false,
-                test.internal ? "output mismatch" : "sum does not match reference"};
+
+    for (std::size_t index = 0; index < c_count; ++index) {
+        if (!close_enough(actual[index], expected[index])) {
+            return {test.name, false,
+                    test.internal ? "output mismatch"
+                                  : "output mismatch at flattened index " +
+                                        std::to_string(index)};
+        }
     }
     return {test.name, true, ""};
 }
@@ -151,9 +189,9 @@ void print_result(const std::string& status,
     std::ostringstream out;
     out << "MYLEETGPU_RESULT={\"status\":" << json_string(status)
         << ",\"cases\":[";
-    for (std::size_t i = 0; i < results.size(); ++i) {
-        if (i != 0) out << ',';
-        const CaseResult& result = results[i];
+    for (std::size_t index = 0; index < results.size(); ++index) {
+        if (index != 0) out << ',';
+        const CaseResult& result = results[index];
         passed += result.passed ? 1U : 0U;
         out << "{\"name\":" << json_string(result.name)
             << ",\"passed\":" << (result.passed ? "true" : "false");
@@ -183,14 +221,18 @@ int main(int argc, char** argv) {
     }
 
     std::vector<TestCase> tests = {
-        {"sample_1", 1, 57721U, 0, false},
-        {"sample_2", 1000, 57721U, 1, false},
+        {"sample_1", 2, 3, 2, 4242U, true, false},
+        {"sample_2", 3, 5, 4, 4242U, true, false},
     };
     if (!public_only) {
-        tests.push_back({"internal_case_1", 31, 112358U, 1, true});
-        tests.push_back({"internal_case_2", 4097, 112358U, 3, true});
-        tests.push_back({"internal_case_3", 65537, 271828U, 2, true});
-        tests.push_back({"internal_case_4", 1048576, 271828U, 3, true});
+        tests.push_back({"internal_case_1", 17, 19, 23, 271828U, false, true});
+        tests.push_back({"internal_case_2", 1, 257, 37, 314159U, false, true});
+        tests.push_back({"internal_case_3", 73, 31, 1, 271828U, false, true});
+        tests.push_back({"internal_case_4", 64, 513, 96, 314159U, false, true});
+        tests.push_back({"internal_case_5", 193, 127, 257, 271828U, false, true});
+        tests.push_back({"internal_case_6", 3, 4096, 5, 314159U, false, true});
+        tests.push_back({"internal_case_7", 4096, 7, 3, 271828U, false, true});
+        tests.push_back({"internal_case_8", 5, 9, 4096, 314159U, false, true});
     }
 
     std::vector<CaseResult> results;

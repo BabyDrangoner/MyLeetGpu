@@ -9,6 +9,7 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <sstream>
@@ -22,8 +23,6 @@ namespace {
 constexpr int kWarmup = 8;
 constexpr int kIterations = 20;
 constexpr const char* kProtocolVersion = "1";
-constexpr float kAtol = 0.02F;
-constexpr float kRtol = 0.00005F;
 
 void cuda_check(cudaError_t status) {
     if (status != cudaSuccess) throw std::runtime_error(cudaGetErrorString(status));
@@ -100,13 +99,6 @@ std::string json_string(const std::string& value) {
     return out.str();
 }
 
-bool close_enough(float actual, float expected) {
-    if (std::isnan(actual) || std::isnan(expected)) return false;
-    if (std::isinf(actual) || std::isinf(expected)) return actual == expected;
-    return std::fabs(actual - expected) <=
-           kAtol + kRtol * std::fabs(expected);
-}
-
 Measurement summarize(const BenchmarkCase& benchmark_case,
                       std::vector<double> samples) {
     std::vector<double> sorted = samples;
@@ -135,17 +127,15 @@ Measurement run_benchmark(const BenchmarkCase& benchmark_case,
                           std::mt19937& generator) {
     const std::size_t count = static_cast<std::size_t>(benchmark_case.n);
     const std::size_t bytes = count * sizeof(float);
-    std::uniform_real_distribution<float> distribution(0.0F, 1.0F);
+    std::uniform_real_distribution<float> distribution(-1.0F, 1.0F);
     std::vector<float> input(count);
     std::vector<float> observed_input(count);
     for (float& value : input) value = distribution(generator);
-    double reference = 0.0;
-    for (const float value : input) reference += static_cast<double>(value);
-    const float expected = static_cast<float>(reference);
+    const float expected = *std::max_element(input.begin(), input.end());
 
     DeviceBuffer<float> device_input(count);
     DeviceBuffer<float> device_output(1);
-    const float output_poison = 1024.0F;
+    const float output_poison = std::numeric_limits<float>::max();
     cuda_check(cudaMemcpyAsync(device_input.get(), input.data(), bytes,
                                cudaMemcpyHostToDevice, stream));
     cuda_check(cudaMemcpyAsync(device_output.get(), &output_poison, sizeof(float),
@@ -166,7 +156,7 @@ Measurement run_benchmark(const BenchmarkCase& benchmark_case,
     if (std::memcmp(observed_input.data(), input.data(), bytes) != 0) {
         throw std::runtime_error("input was modified");
     }
-    if (!close_enough(actual, expected)) {
+    if (std::isnan(actual) || actual != expected) {
         throw std::runtime_error("correctness check failed before timing");
     }
 
@@ -233,7 +223,7 @@ int main() {
     try {
         cuda_check(cudaFree(nullptr));
         Stream stream;
-        std::mt19937 generator(20240517U);
+        std::mt19937 generator(20240519U);
         std::vector<Measurement> measurements;
         measurements.reserve(cases.size());
         for (const BenchmarkCase& benchmark_case : cases) {
