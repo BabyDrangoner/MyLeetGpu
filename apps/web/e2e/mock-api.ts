@@ -93,7 +93,7 @@ const environment = {
   nvcc_version: '12.6.85',
   python_version: '3.11.10',
   torch_version: '2.5.1+cu124',
-  triton_version: '3.2.0',
+  triton_version: '3.1.0',
   cuda_image: 'nvidia/cuda:12.6.3-devel-ubuntu22.04',
   image_digest: 'sha256:e2e',
   observed_at: '2026-08-16T01:00:00Z',
@@ -107,6 +107,8 @@ const problems = [
   { slug: 'max-reduction', title: '单精度向量最大值归约', difficulty: 'medium', revision: '1', summary: '并行求出向量中的最大值。', languages: ['cuda_cpp', 'triton_python'] },
   { slug: 'softmax', title: '逐行 Softmax', difficulty: 'medium', revision: '1', summary: '实现数值稳定的逐行 Softmax。', languages: ['cuda_cpp', 'triton_python'] },
   { slug: 'matrix-multiplication', title: '行主序矩阵乘法', difficulty: 'medium', revision: '1', summary: '实现行主序矩阵乘法。', languages: ['cuda_cpp', 'triton_python'] },
+  { slug: 'top-k', title: '二维张量逐行 Top-K', difficulty: 'hard', revision: '1', summary: '逐行选出最大的 K 个值及其索引。', languages: ['cuda_cpp', 'triton_python'] },
+  { slug: 'top-p', title: '逐行 Top-P 核筛选', difficulty: 'hard', revision: '1', summary: '按累计概率阈值保留最小有序前缀。', languages: ['cuda_cpp', 'triton_python'] },
   { slug: 'multi-head-attention', title: '多头自注意力', difficulty: 'medium', revision: '2', summary: '实现输入为 X 和 isCasual 的 MHA class。', languages: ['torch_python'] },
   { slug: 'grouped-query-attention', title: '分组查询自注意力', difficulty: 'hard', revision: '2', summary: '实现输入为 X 和 isCasual 的 GQA class。', languages: ['torch_python'] },
 ]

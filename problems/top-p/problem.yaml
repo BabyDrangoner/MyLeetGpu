@@ -1,0 +1,180 @@
+schema_version: 2
+slug: top-p
+title: 逐行 Top-P 核筛选
+difficulty: hard
+revision: 1
+default_language: cuda_cpp
+
+implementations:
+  cuda_cpp:
+    language: cuda_cpp
+    starter: starter.cu
+    statement_appendix: instructions/cuda_cpp.md
+    signature:
+      header: include/solve.h
+      symbol: solve
+      declaration: "void solve(const float* probabilities, float* output, int* counts, int rows, int cols, float p, cudaStream_t stream)"
+    harness:
+      validator: harness/validator.cu
+      benchmark: harness/benchmark.cu
+    compiler:
+      executable: nvcc
+      standard: c++17
+      optimization: O3
+      architecture: detected
+      allowed_flags:
+        - --std=c++17
+        - -O3
+      include_paths:
+        - include
+  triton_python:
+    language: triton_python
+    starter: triton/starter.py
+    statement_appendix: instructions/triton_python.md
+    signature:
+      symbol: solve
+      declaration: "def solve(probabilities: torch.Tensor, output: torch.Tensor, counts: torch.Tensor, rows: int, cols: int, p: float) -> None"
+    harness:
+      validator: triton/harness/validator.py
+      benchmark: triton/harness/benchmark.py
+    runtime:
+      profile: triton_torch_cuda_v1
+      executable: python3
+      syntax_check: py_compile
+
+types:
+  inputs:
+    - name: probabilities
+      type: float32
+      shape: [rows, cols]
+      layout: row_major
+      memory: device
+      access: read_only
+    - name: rows
+      type: int32
+      memory: host_value
+    - name: cols
+      type: int32
+      memory: host_value
+    - name: p
+      type: float32
+      memory: host_value
+  outputs:
+    - name: output
+      type: float32
+      shape: [rows, cols]
+      layout: row_major_sorted_rank
+      memory: device
+      access: write_only
+    - name: counts
+      type: int32
+      shape: [rows]
+      layout: contiguous
+      memory: device
+      access: write_only
+
+constraints:
+  rows:
+    min: 1
+    max: 65536
+  cols:
+    min: 1
+    max: 1024
+  elements:
+    max: 4194304
+  probabilities:
+    finite: true
+    nonnegative: true
+    row_sum: 1.0
+  p:
+    exclusive_min: 0.0
+    max: 1.0
+  output_order: descending_probability_rank
+  aliasing: none
+
+tolerance:
+  mode: float
+  atol: 0.0
+  rtol: 0.0
+  nan_equal: false
+  infinity: same_sign
+
+public:
+  seed: 7355608
+  timeout_ms: 10000
+  cases:
+    - name: sample_singleton
+      rows: 1
+      cols: 1
+      p: 0.5
+      pattern: singleton
+    - name: sample_non_power_of_two
+      rows: 3
+      cols: 5
+      p: 0.7
+      pattern: ramp
+
+internal:
+  seeds: [271828, 314159]
+  timeout_ms: 60000
+  cases:
+    - rows: 7
+      cols: 31
+      p: 0.55
+      pattern: ramp
+    - rows: 257
+      cols: 3
+      p: 0.8
+      pattern: dominant
+    - rows: 19
+      cols: 257
+      p: 0.02
+      pattern: quadratic
+    - rows: 37
+      cols: 513
+      p: 1.0
+      pattern: near_uniform
+    - rows: 64
+      cols: 1024
+      p: 0.9
+      pattern: quadratic
+    - rows: 4096
+      cols: 1024
+      p: 0.95
+      pattern: ramp
+    - rows: 65536
+      cols: 1
+      p: 0.5
+      pattern: singleton
+
+benchmark:
+  protocol_version: "1"
+  suite_seed: 20260905
+  sizes:
+    - label: 8192x128
+      rows: 8192
+      cols: 128
+      p: 0.5
+      elements: 1048576
+      inner_repetitions: 8
+    - label: 4096x512
+      rows: 4096
+      cols: 512
+      p: 0.9
+      elements: 2097152
+      inner_repetitions: 4
+    - label: 4096x1024
+      rows: 4096
+      cols: 1024
+      p: 0.95
+      elements: 4194304
+      inner_repetitions: 2
+  warmup: 6
+  iterations: 20
+  timeout_ms: 120000
+
+timeouts:
+  compile_ms: 30000
+  public_ms: 10000
+  validation_ms: 60000
+  benchmark_ms: 120000

@@ -30,6 +30,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
             "problems/matrix-transpose/triton/starter.py",
             ("input", "output", "rows", "cols"),
         ),
+        (
+            "problems/top-k/triton/starter.py",
+            ("input", "values", "indices", "rows", "cols", "k"),
+        ),
+        (
+            "problems/top-p/triton/starter.py",
+            ("probabilities", "output", "counts", "rows", "cols", "p"),
+        ),
     ],
 )
 def test_builtin_triton_starters_are_accepted(
@@ -232,5 +240,25 @@ def solve(input: torch.Tensor, output: torch.Tensor, n: int) -> None:
     validate_source(source, expected_parameters=("input", "output", "n"))
 
 
+def test_policy_accepts_sort_and_cumsum_for_nucleus_filtering() -> None:
+    source = """
+import torch
+import triton
+import triton.language as tl
+@triton.jit
+def kernel(input, output, n, BLOCK_SIZE: tl.constexpr):
+    offsets = tl.arange(0, BLOCK_SIZE)
+    values = tl.load(input + offsets, mask=offsets < n, other=-1.0)
+    ordered = tl.sort(values, descending=True)
+    cumulative = tl.cumsum(ordered, axis=0)
+    tl.store(output + offsets, cumulative, mask=offsets < n)
+def solve(input: torch.Tensor, output: torch.Tensor, n: int) -> None:
+    block_size = triton.next_power_of_2(n)
+    kernel[(1,)](input, output, n, BLOCK_SIZE=block_size)
+"""
+
+    validate_source(source, expected_parameters=("input", "output", "n"))
+
+
 def test_policy_version_is_persistable_comparison_identity() -> None:
-    assert POLICY_VERSION == "restricted_triton_v1"
+    assert POLICY_VERSION == "restricted_triton_v2"

@@ -1,0 +1,180 @@
+schema_version: 2
+slug: top-k
+title: 二维张量逐行 Top-K
+difficulty: hard
+revision: 1
+default_language: cuda_cpp
+
+implementations:
+  cuda_cpp:
+    language: cuda_cpp
+    starter: starter.cu
+    statement_appendix: instructions/cuda_cpp.md
+    signature:
+      header: include/solve.h
+      symbol: solve
+      declaration: "void solve(const float* input, float* values, int* indices, int rows, int cols, int k, cudaStream_t stream)"
+    harness:
+      validator: harness/validator.cu
+      benchmark: harness/benchmark.cu
+    compiler:
+      executable: nvcc
+      standard: c++17
+      optimization: O3
+      architecture: detected
+      allowed_flags:
+        - --std=c++17
+        - -O3
+      include_paths:
+        - include
+  triton_python:
+    language: triton_python
+    starter: triton/starter.py
+    statement_appendix: instructions/triton_python.md
+    signature:
+      symbol: solve
+      declaration: "def solve(input: torch.Tensor, values: torch.Tensor, indices: torch.Tensor, rows: int, cols: int, k: int) -> None"
+    harness:
+      validator: triton/harness/validator.py
+      benchmark: triton/harness/benchmark.py
+    runtime:
+      profile: triton_torch_cuda_v1
+      executable: python3
+      syntax_check: py_compile
+
+types:
+  inputs:
+    - name: input
+      type: float32
+      shape: [rows, cols]
+      layout: row_major
+      memory: device
+      access: read_only
+    - name: rows
+      type: int32
+      memory: host_value
+    - name: cols
+      type: int32
+      memory: host_value
+    - name: k
+      type: int32
+      memory: host_value
+  outputs:
+    - name: values
+      type: float32
+      shape: [rows, k]
+      layout: row_major
+      memory: device
+      access: write_only
+    - name: indices
+      type: int32
+      shape: [rows, k]
+      layout: row_major
+      memory: device
+      access: write_only
+
+constraints:
+  rows:
+    min: 1
+    max: 4194304
+  cols:
+    min: 1
+    max: 1024
+  k:
+    min: 1
+    max: 64
+    at_most: cols
+  elements:
+    max: 4194304
+  values:
+    finite: true
+    min: -10000.0
+    max: 10000.0
+  aliasing: none
+
+tolerance:
+  mode: float
+  atol: 0.0
+  rtol: 0.0
+  nan_equal: false
+  infinity: same_sign
+
+public:
+  seed: 73013
+  timeout_ms: 5000
+  cases:
+    - name: sample_1
+      rows: 2
+      cols: 5
+      k: 1
+      pattern: sequence
+    - name: sample_2
+      rows: 3
+      cols: 9
+      k: 3
+      pattern: ties
+
+internal:
+  seeds: [271828, 314159]
+  timeout_ms: 30000
+  cases:
+    - rows: 7
+      cols: 31
+      k: 7
+      pattern: random
+    - rows: 5
+      cols: 64
+      k: 64
+      pattern: descending
+    - rows: 4096
+      cols: 17
+      k: 4
+      pattern: ties
+    - rows: 65536
+      cols: 1
+      k: 1
+      pattern: all_equal
+    - rows: 4096
+      cols: 1024
+      k: 64
+      pattern: extreme
+    - rows: 257
+      cols: 513
+      k: 1
+      pattern: random
+    - rows: 127
+      cols: 1023
+      k: 63
+      pattern: ties
+
+benchmark:
+  protocol_version: "1"
+  suite_seed: 20240902
+  sizes:
+    - label: 32768x32-k4
+      rows: 32768
+      cols: 32
+      k: 4
+      elements: 1048576
+      inner_repetitions: 8
+    - label: 8192x256-k16
+      rows: 8192
+      cols: 256
+      k: 16
+      elements: 2097152
+      inner_repetitions: 4
+    - label: 4096x1024-k64
+      rows: 4096
+      cols: 1024
+      k: 64
+      elements: 4194304
+      inner_repetitions: 1
+  warmup: 8
+  iterations: 20
+  timeout_ms: 120000
+
+timeouts:
+  compile_ms: 60000
+  public_ms: 5000
+  validation_ms: 30000
+  benchmark_ms: 120000

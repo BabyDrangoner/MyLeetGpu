@@ -1367,7 +1367,7 @@ def test_triton_build_config_records_language_toolchain_and_architecture(
 
     assert flags == [
         "backend=triton_python",
-        "policy=restricted_triton_v1",
+        "policy=restricted_triton_v2",
         "python=3.11.11",
         "torch=2.5.1+cu124",
         "triton=3.1.0",

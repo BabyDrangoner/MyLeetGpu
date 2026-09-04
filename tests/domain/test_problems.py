@@ -19,6 +19,8 @@ KERNEL_SLUGS = {
     "max-reduction",
     "reduction",
     "softmax",
+    "top-k",
+    "top-p",
     "vector-addition",
 }
 TORCH_SLUGS = {"multi-head-attention", "grouped-query-attention"}
@@ -38,8 +40,8 @@ def load_raw_manifest(slug: str = "vector-addition") -> dict[str, object]:
     return yaml.safe_load((PROBLEMS_ROOT / slug / "problem.yaml").read_text(encoding="utf-8"))
 
 
-def test_catalog_loads_all_eight_builtin_original_problems(catalog: ProblemCatalog) -> None:
-    assert len(catalog) == 8
+def test_catalog_loads_all_ten_builtin_original_problems(catalog: ProblemCatalog) -> None:
+    assert len(catalog) == 10
     assert {problem.manifest.slug for problem in catalog.list()} == EXPECTED_SLUGS
 
 
@@ -50,6 +52,8 @@ def test_new_kernel_protocols_cover_their_defining_operations_and_boundaries(
     maximum = catalog.get("max-reduction")
     softmax = catalog.get("softmax")
     matmul = catalog.get("matrix-multiplication")
+    top_k = catalog.get("top-k")
+    top_p = catalog.get("top-p")
 
     assert reduction.manifest.revision == "2"
     assert "tl.sum" in reduction.get_implementation("triton_python").starter_code
@@ -71,6 +75,21 @@ def test_new_kernel_protocols_cover_their_defining_operations_and_boundaries(
     matmul_cases = matmul.manifest.internal.cases
     assert all(any(case[axis] == 4096 for case in matmul_cases) for axis in ("m", "k", "n"))
     assert "tl.dot" in matmul.get_implementation("triton_python").starter_code
+
+    top_k_starter = top_k.get_implementation("triton_python").starter_code
+    assert "tl.argmax" in top_k_starter
+    assert "k: tl.constexpr" not in top_k_starter
+    assert any(case["k"] == case["cols"] for case in top_k.manifest.internal.cases)
+
+    top_p_starter = top_p.get_implementation("triton_python").starter_code
+    assert "tl.sort" in top_p_starter
+    assert "tl.cumsum" in top_p_starter
+    assert "below_threshold.to(tl.int32)" in top_p_starter
+    assert "tl.argsort" not in top_p_starter
+    assert any(case["p"] == 1.0 for case in top_p.manifest.internal.cases)
+    assert any(
+        case["rows"] == 65536 and case["cols"] == 1 for case in top_p.manifest.internal.cases
+    )
 
 
 @pytest.mark.parametrize("slug", sorted(KERNEL_SLUGS))

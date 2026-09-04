@@ -78,7 +78,7 @@ describe('API contract adapter', () => {
       .mockResolvedValueOnce(json({
         healthy: true, status: 'healthy', gpu_name: 'RTX 4060', cuda_image: 'cuda:12.6',
         image_digest: 'sha256:abc', observed_at: '2026-08-16T01:00:00',
-        backend: 'triton_python', toolchain: { python_version: '3.11.10', torch_version: '2.5.1+cu124', triton_version: '3.2.0' },
+        backend: 'triton_python', toolchain: { python_version: '3.11.10', torch_version: '2.5.1+cu124', triton_version: '3.1.0' },
         telemetry: { temperature_c: null, power_w: '95' },
       }))
 
@@ -95,7 +95,7 @@ describe('API contract adapter', () => {
     expect(environment.backend).toBe('triton_python')
     expect(environment.python_version).toBe('3.11.10')
     expect(environment.torch_version).toBe('2.5.1+cu124')
-    expect(environment.triton_version).toBe('3.2.0')
+    expect(environment.triton_version).toBe('3.1.0')
     expect(environment.unavailable_metrics).toEqual(['temperature_c'])
     expect(environment.checked_at).toBe('2026-08-16T01:00:00Z')
   })

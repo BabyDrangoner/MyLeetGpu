@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import { gqaTorchStarterSource, installMockApi, starterSource, torchStarterSource, tritonStarterSource } from './mock-api'
 
-test('loads all eight problems and opens the CUDA workspace', async ({ page }) => {
+test('loads all ten problems and opens the CUDA workspace', async ({ page }) => {
   await installMockApi(page)
   await page.goto('/problems')
 
@@ -12,6 +12,8 @@ test('loads all eight problems and opens the CUDA workspace', async ({ page }) =
   await expect(page.getByRole('link', { name: /单精度向量最大值归约/ })).toBeVisible()
   await expect(page.getByRole('link', { name: /逐行 Softmax/ })).toBeVisible()
   await expect(page.getByRole('link', { name: /行主序矩阵乘法/ })).toBeVisible()
+  await expect(page.getByRole('link', { name: /二维张量逐行 Top-K/ })).toBeVisible()
+  await expect(page.getByRole('link', { name: /逐行 Top-P 核筛选/ })).toBeVisible()
   await expect(page.getByRole('link', { name: /多头自注意力/ })).toBeVisible()
   await expect(page.getByRole('link', { name: /分组查询自注意力/ })).toBeVisible()
   await page.getByRole('link', { name: /向量逐元素相加/ }).click()
@@ -114,7 +116,7 @@ test('shows the independently probed Triton toolchain environment', async ({ pag
   await expect(page.getByText('NVCC', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Triton (Python)' }).click()
   await expect(page.getByText('Python / PyTorch / Triton')).toBeVisible()
-  await expect(page.getByText('3.11.10 / 2.5.1+cu124 / 3.2.0')).toBeVisible()
+  await expect(page.getByText('3.11.10 / 2.5.1+cu124 / 3.1.0')).toBeVisible()
 
   await page.getByRole('button', { name: 'PyTorch (Python)' }).click()
   await expect(page.getByText('Python / PyTorch / Torch CUDA')).toBeVisible()

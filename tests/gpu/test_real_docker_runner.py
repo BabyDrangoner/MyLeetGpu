@@ -189,6 +189,8 @@ def test_real_compile_sandbox_has_no_gpu_device(real_runner: DockerRunner) -> No
         "max-reduction",
         "softmax",
         "matrix-multiplication",
+        "top-k",
+        "top-p",
     ],
 )
 def test_real_runner_compiles_and_fully_validates_each_builtin_problem(
@@ -336,6 +338,8 @@ def solve(a: torch.Tensor, b: torch.Tensor, output: torch.Tensor, n: int) -> Non
         "max-reduction",
         "softmax",
         "matrix-multiplication",
+        "top-k",
+        "top-p",
     ],
 )
 def test_real_runner_fully_validates_each_triton_starter(
@@ -378,6 +382,8 @@ def test_real_runner_fully_validates_each_triton_starter(
         "max-reduction",
         "softmax",
         "matrix-multiplication",
+        "top-k",
+        "top-p",
     ],
 )
 def test_real_runner_collects_event_samples_for_each_triton_problem(

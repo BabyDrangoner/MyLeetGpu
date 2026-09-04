@@ -6,7 +6,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Final
 
-POLICY_VERSION: Final = "restricted_triton_v1"
+POLICY_VERSION: Final = "restricted_triton_v2"
 
 _EXACT_IMPORTS = {
     ("torch", None),
@@ -95,6 +95,7 @@ _TL_CALLS = {
     "sigmoid",
     "sin",
     "softmax",
+    "sort",
     "sqrt",
     "static_range",
     "store",
