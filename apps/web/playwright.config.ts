@@ -19,7 +19,7 @@ export default defineConfig({
     viewport: { width: 1440, height: 900 },
   },
   projects: [
-    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    { name: 'chromium', use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 }, channel: process.env.MYLEETGPU_E2E_CHANNEL } },
   ],
   webServer: {
     command: `pnpm exec vite --host 127.0.0.1 --port ${e2ePort}`,

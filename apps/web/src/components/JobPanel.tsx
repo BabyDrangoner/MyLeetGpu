@@ -34,7 +34,7 @@ function Cases({ cases }: { cases: TestCaseResult[] }) {
 
 export function JobPanel({ job, requestError, onClear }: { job: Job | null; requestError?: Error | null; onClear?: () => void }) {
   if (!job && requestError) {
-    return <StatusView kind="error" compact description={requestError.message} />
+    return <StatusView kind="error" compact title="任务请求失败" description={requestError.message} />
   }
   if (!job) {
     return (
@@ -60,6 +60,7 @@ export function JobPanel({ job, requestError, onClear }: { job: Job | null; requ
 
   return (
     <div className="job-panel">
+      {requestError && <StatusView kind="error" compact title="任务请求失败" description={requestError.message} />}
       <div className="job-head">
         <div className={`job-state ${active ? 'active' : job.status}`}>
           {active ? <LoaderCircle className="spin" size={16} /> : job.status === 'succeeded' ? <Check size={16} /> : timedOut ? <Clock3 size={16} /> : <CircleAlert size={16} />}

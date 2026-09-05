@@ -261,7 +261,7 @@ export function VersionsPage() {
                 return (
                   <article className={`version-row ${checked ? 'selected' : ''}`} key={version.id}>
                     <label className="version-check">
-                      <input type="checkbox" checked={checked} disabled={!checked && selected.length >= MAX_SELECTED_VERSIONS} onChange={() => toggleSelected(version.id)} />
+                      <input type="checkbox" aria-label={`选择 ${version.name}`} checked={checked} disabled={!checked && selected.length >= MAX_SELECTED_VERSIONS} onChange={() => toggleSelected(version.id)} />
                       <span>{checked && <Check size={13} />}</span>
                     </label>
                     <div className="version-primary">
@@ -271,7 +271,7 @@ export function VersionsPage() {
                     <div className="version-metadata"><span>{formatDate(version.created_at)}</span><code>{shortHash(version.source_hash)}</code></div>
                     <div className="version-env"><span>环境</span><code title={run?.environment_fingerprint}>{shortHash(run?.environment_fingerprint ?? run?.environment?.fingerprint)}</code></div>
                     <label className={`baseline-radio ${checked ? '' : 'disabled'}`}>
-                      <input type="radio" name="baseline" disabled={!checked} checked={baselineId === version.id} onChange={() => setBaselineId(version.id)} />
+                      <input type="radio" name="baseline" aria-label={`将 ${version.name} 设为 baseline`} disabled={!checked} checked={baselineId === version.id} onChange={() => setBaselineId(version.id)} />
                       <span />baseline
                     </label>
                     <div className="row-actions">

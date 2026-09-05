@@ -5,6 +5,12 @@ import { JobPanel } from './JobPanel'
 afterEach(cleanup)
 
 describe('JobPanel', () => {
+  it('shows a new request error alongside the previous task result', () => {
+    render(<JobPanel job={{ id: 'last-run', language: 'cuda_cpp', action: 'run', status: 'succeeded', result: { summary: '上次样例全部通过' } }} requestError={new Error('无法连接执行服务')} />)
+    expect(screen.getByRole('alert')).toHaveTextContent('无法连接执行服务')
+    expect(screen.getByText('上次样例全部通过')).toBeInTheDocument()
+  })
+
   it('shows timeout as a distinct terminal state', () => {
     render(<JobPanel job={{ id: 'job-timeout', language: 'cuda_cpp', action: 'run', status: 'timed_out', error: { message: '运行超过 5 秒' } }} />)
     expect(screen.getByText('已超时')).toBeInTheDocument()

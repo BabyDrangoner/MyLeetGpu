@@ -5,7 +5,7 @@ test('loads all ten problems and opens the CUDA workspace', async ({ page }) => 
   await installMockApi(page)
   await page.goto('/problems')
 
-  await expect(page.getByRole('heading', { name: '把想法变成可靠、快速的实现' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '题目', exact: true })).toBeVisible()
   await expect(page.getByRole('link', { name: /向量逐元素相加/ })).toBeVisible()
   await expect(page.getByRole('link', { name: /行主序矩阵转置/ })).toBeVisible()
   await expect(page.getByRole('link', { name: /单精度向量求和归约/ })).toBeVisible()

@@ -1,11 +1,13 @@
-import { ArrowRight, BookOpen, Gauge, Search, Sparkles } from 'lucide-react'
+import { ArrowRight, Search, X } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import { RetryButton, StatusView } from '../components/StatusView'
 import { useAsync } from '../hooks/useAsync'
 import { difficultyLabel } from '../lib/format'
-import { implementationLanguages } from '../lib/languages'
+import { languageMetadata } from '../lib/languages'
+
+type ProblemCategory = 'all' | 'kernel' | 'torch'
 
 const difficultyClass = (difficulty: string) => {
   if (difficulty.includes('困难') || difficulty === 'hard') return 'hard'
@@ -17,41 +19,50 @@ export function ProblemListPage() {
   const { data: problems, loading, error, reload } = useAsync(() => api.problems.list(), [])
   const [query, setQuery] = useState('')
   const [difficulty, setDifficulty] = useState('全部')
+  const [category, setCategory] = useState<ProblemCategory>('all')
 
+  const categories: { value: ProblemCategory; label: string; count: number }[] = [
+    { value: 'all', label: '全部题目', count: problems?.length ?? 0 },
+    { value: 'kernel', label: '算子题', count: problems?.filter((problem) => problem.languages?.some((language) => language !== 'torch_python')).length ?? 0 },
+    { value: 'torch', label: 'PyTorch 题', count: problems?.filter((problem) => problem.languages?.includes('torch_python')).length ?? 0 },
+  ]
   const filtered = useMemo(() => (problems ?? []).filter((problem) => {
     const matchesQuery = `${problem.title} ${problem.slug} ${problem.summary}`.toLowerCase().includes(query.trim().toLowerCase())
     const matchesDifficulty = difficulty === '全部' || difficultyLabel(problem.difficulty) === difficulty
-    return matchesQuery && matchesDifficulty
-  }), [problems, query, difficulty])
+    const matchesCategory = category === 'all' || (category === 'torch'
+      ? problem.languages?.includes('torch_python')
+      : problem.languages?.some((language) => language !== 'torch_python'))
+    return matchesQuery && matchesDifficulty && matchesCategory
+  }), [problems, query, difficulty, category])
+
+  const resetFilters = () => { setQuery(''); setDifficulty('全部'); setCategory('all') }
 
   return (
     <div className="page problems-page">
-      <section className="hero-section">
+      <header className="catalog-heading">
         <div>
-          <div className="eyebrow"><Sparkles size={14} /> GPU &amp; PYTORCH LAB</div>
-          <h1>把想法变成可靠、快速的实现</h1>
-          <p>在同一套本地环境里编写、验证并严谨比较 CUDA C++、Triton 与 PyTorch 实现。</p>
+          <h1>题目</h1>
+          <p>从正确实现开始，再探索性能优化。</p>
         </div>
-        <div className="hero-stat-grid">
-          <div className="hero-stat"><strong>{problems?.length ?? '—'}</strong><span>原创题目</span></div>
-          <div className="hero-stat"><strong>{implementationLanguages.length}</strong><span>实现语言</span></div>
-          <div className="hero-stat"><strong>Median</strong><span>核心指标</span></div>
-        </div>
-      </section>
+        <span className="catalog-total">{loading ? '正在加载' : `${problems?.length ?? 0} 道练习`}</span>
+      </header>
 
-      <section className="list-section">
-        <div className="section-heading-row">
-          <div>
-            <h2>选择一道题目</h2>
-            <p>每道题都提供平台控制的验证与 benchmark harness。</p>
+      <section className="list-section" aria-label="题目列表">
+        <div className="catalog-toolbar">
+          <div className="category-filter" role="group" aria-label="按题型筛选">
+            {categories.map((item) => (
+              <button key={item.value} type="button" aria-pressed={category === item.value} className={category === item.value ? 'active' : ''} onClick={() => setCategory(item.value)}>
+                {item.label}<span>{item.count}</span>
+              </button>
+            ))}
           </div>
           <div className="list-tools">
             <label className="search-box">
-              <Search size={16} />
-              <input aria-label="搜索题目" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索题目…" />
+              <Search size={16} aria-hidden="true" />
+              <input type="search" aria-label="搜索题目" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称或关键词" />
             </label>
             <select aria-label="按难度筛选" value={difficulty} onChange={(event) => setDifficulty(event.target.value)}>
-              <option>全部</option>
+              <option value="全部">全部难度</option>
               <option>入门</option>
               <option>简单</option>
               <option>中等</option>
@@ -60,29 +71,32 @@ export function ProblemListPage() {
           </div>
         </div>
 
-        {loading && <div className="problem-skeleton-grid" aria-label="正在加载题目">{[1, 2, 3].map((item) => <div className="problem-skeleton" key={item} />)}</div>}
+        <div className="catalog-description">
+          <span role="status">{loading ? '正在读取题目…' : `显示 ${filtered.length} 道题目`}</span>
+          {(query || difficulty !== '全部' || category !== 'all') && <button className="text-button" type="button" onClick={resetFilters}><X size={13} />清除筛选</button>}
+          <span className="catalog-hint">编写 · 验证 · 比较</span>
+        </div>
+
+        {loading && <div className="problem-skeleton-grid" aria-label="正在加载题目">{[1, 2, 3, 4, 5].map((item) => <div className="problem-skeleton" key={item} />)}</div>}
         {!loading && error && <StatusView kind="error" description={error.message} action={<RetryButton onClick={() => void reload()} />} />}
         {!loading && !error && !problems?.length && <StatusView kind="empty" title="还没有题目" description="题目清单为空，请检查 problems 目录与后端启动日志。" />}
-        {!loading && !error && !!problems?.length && !filtered.length && <StatusView kind="empty" title="没有匹配的题目" description="试试缩短关键词或选择其他难度。" />}
+        {!loading && !error && !!problems?.length && !filtered.length && <StatusView kind="empty" title="没有匹配的题目" description="试试其他关键词，或清除筛选查看全部题目。" action={<button className="button secondary" type="button" onClick={resetFilters}>清除筛选</button>} />}
         {!loading && !error && filtered.length > 0 && (
-          <div className="problem-grid">
-            {filtered.map((problem, index) => (
-              <Link className="problem-card" to={`/problems/${encodeURIComponent(problem.slug)}`} key={problem.slug}>
-                <div className="problem-card-top">
-                  <span className="problem-index">{String(index + 1).padStart(2, '0')}</span>
-                  <span className={`difficulty ${difficultyClass(problem.difficulty)}`}>{difficultyLabel(problem.difficulty)}</span>
-                </div>
-                <div className="problem-glyph" aria-hidden="true">
-                  {index % 3 === 0 ? <span className="vector-glyph">A + B → C</span> : index % 3 === 1 ? <span className="matrix-glyph"><i /><i /><i /><i /></span> : <Gauge size={33} />}
-                </div>
-                <h3>{problem.title}</h3>
-                <p>{problem.summary || '编写高效、正确且可验证的实现。'}</p>
-                <div className="problem-meta">
-                  <span><BookOpen size={14} /> 修订 {problem.revision}</span>
-                  <span className="start-link">开始编码 <ArrowRight size={15} /></span>
-                </div>
-              </Link>
-            ))}
+          <div className="problem-table">
+            <div className="problem-table-heading" aria-hidden="true"><span>#</span><span>题目</span><span>实现语言</span><span>难度</span><span /></div>
+            <ul className="problem-list">
+              {filtered.map((problem) => (
+                <li key={problem.slug}>
+                  <Link className="problem-row" to={`/problems/${encodeURIComponent(problem.slug)}`}>
+                    <span className="problem-index" aria-hidden="true">{String((problems?.indexOf(problem) ?? 0) + 1).padStart(2, '0')}</span>
+                    <div className="problem-copy"><h2>{problem.title}</h2><p>{problem.summary && problem.summary !== problem.title ? problem.summary : problem.slug}</p></div>
+                    <div className="problem-languages">{problem.languages?.map((language) => <span key={language}>{languageMetadata[language].shortLabel}</span>)}</div>
+                    <span className={`difficulty ${difficultyClass(problem.difficulty)}`}>{difficultyLabel(problem.difficulty)}</span>
+                    <ArrowRight className="problem-open" size={16} aria-hidden="true" />
+                  </Link>
+                </li>
+              ))}
+            </ul>
           </div>
         )}
       </section>

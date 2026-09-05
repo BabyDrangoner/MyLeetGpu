@@ -221,6 +221,12 @@ make stop
 
 ### 5.1 选择题目与编辑代码
 
+界面默认使用低饱和浅色主题，右上角可以切换深色模式；主题偏好会保存在当前浏览器中，代码编辑器与 Diff 会同步切换。题目列表支持按「算子题 / PyTorch 题」、难度和关键词组合筛选。
+
+编码时，点击「专注编码」可暂时隐藏题面，再点击「显示题目」恢复；「任务与输出」可以收起以增加编辑空间，提交任务或收到结果后会自动展开。按 `Ctrl + Enter`（macOS 为 `⌘ + Enter`）运行当前语言的最新代码样例；任务执行、草稿加载或弹窗打开时不会触发快捷运行。小屏幕会自动收紧导航，并把题面、编辑器和结果按顺序排列。
+
+拖动题面与代码之间的竖向分隔线，可调整左右宽度；拖动代码与输出之间的横向分隔线，可调整上下高度。布局比例会保存在当前浏览器，刷新或切换题目后继续使用。双击某条分隔线恢复该方向的默认比例，点击「重置布局」恢复全部比例（不修改代码）。分隔线支持鼠标、触控及键盘：`Tab` 聚焦后用对应方向键微调，按住 `Shift` 加速，`Home` / `End` 调至允许范围的两端，`Enter` 恢复默认。专注模式、输出收起和小屏适配不会清除已保存的比例；窄屏仅显示上下分隔线。
+
 1. 在题目列表选择当前十道内置题之一：Vector Addition、Matrix Transpose、Sum Reduction、Max Reduction、Softmax、Matrix Multiplication、Top-K 和 Top-P 分别提供 CUDA C++ 与 Triton (Python) starter；多头自注意力（MHA）和分组查询自注意力（GQA）提供 PyTorch (Python) class starter。
 2. 用编辑器顶部的语言切换器选择当前题目支持的实现。URL 会保留 `language=cuda_cpp`、`language=triton_python` 或 `language=torch_python`，刷新和进入性能页时仍能回到同一语言；语言切换器不会显示当前题目没有声明的实现。
 3. 阅读当前语言的入口签名、补充说明、约束和浮点容差。CUDA 不要自行提供 `main`；Triton 可以定义多个 `@triton.jit` Kernel，但必须保留可调用的 Python `solve(...)`；PyTorch MHA/GQA 只实现 starter 指定的普通 class 及 `forward(X, isCasual)`。两种 Python 实现都必须遵守题面列出的受限语法。

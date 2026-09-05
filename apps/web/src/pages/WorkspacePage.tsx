@@ -1,4 +1,4 @@
-import { Archive, Braces, ChevronLeft, Clock3, FileCheck2, Play, RotateCcw, Save, Settings2 } from 'lucide-react'
+import { Archive, Braces, ChevronDown, ChevronLeft, ChevronRight, Clock3, FileCheck2, PanelsTopLeft, PanelLeftClose, PanelLeftOpen, Play, RotateCcw, Save, Settings2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
@@ -6,14 +6,16 @@ import { CodeEditor } from '../components/CodeEditor'
 import { JobPanel } from '../components/JobPanel'
 import { MarkdownText } from '../components/MarkdownText'
 import { Modal } from '../components/Modal'
+import { ResizeHandle } from '../components/ResizeHandle'
 import { SaveVersionDialog, type SaveVersionPayload } from '../components/SaveVersionDialog'
 import { RetryButton, StatusView } from '../components/StatusView'
 import { useToast } from '../components/Toast'
 import type { Job, JobAction, KernelLanguage, SavedVersion } from '../domain/types'
 import { useAsync } from '../hooks/useAsync'
 import { useJob } from '../hooks/useJob'
+import { useWorkspaceLayout } from '../hooks/useWorkspaceLayout'
 import { readLocalDraft, saveLocalDraft } from '../lib/drafts'
-import { difficultyLabel, formatDate } from '../lib/format'
+import { difficultyLabel, formatDate, readableStatus } from '../lib/format'
 import { implementationLanguages, isKernelLanguage, languageLabel } from '../lib/languages'
 
 const difficultyClass = (difficulty: string) => difficulty.includes('困难') || difficulty === 'hard' ? 'hard' : difficulty.includes('中等') || difficulty === 'medium' ? 'medium' : 'easy'
@@ -28,6 +30,8 @@ export function WorkspacePage() {
   const [draftSavedAt, setDraftSavedAt] = useState<string>()
   const [draftRemote, setDraftRemote] = useState<'idle' | 'saving' | 'saved' | 'local-only'>('idle')
   const [statementTab, setStatementTab] = useState<'statement' | 'protocol'>('statement')
+  const [focusMode, setFocusMode] = useState(false)
+  const [outputExpanded, setOutputExpanded] = useState(true)
   const [resetOpen, setResetOpen] = useState(false)
   const [saveOpen, setSaveOpen] = useState(false)
   const [saveSnapshot, setSaveSnapshot] = useState<{ language: KernelLanguage; source: string }>()
@@ -35,6 +39,9 @@ export function WorkspacePage() {
   const autosaveSequence = useRef(0)
   const draftLoadSequence = useRef(0)
   const sourceRevision = useRef(0)
+  const sourceRef = useRef(source)
+  const submissionLock = useRef(false)
+  const layout = useWorkspaceLayout()
 
   const supportedLanguages = useMemo(() => {
     const implementations = problem.data?.implementations
@@ -58,6 +65,7 @@ export function WorkspacePage() {
   }, [slug])
 
   const onJobSettled = useCallback((settled: Job) => {
+    setOutputExpanded(true)
     if (settled.status === 'succeeded') {
       const label = settled.action === 'save_version' ? '性能版本已保存' : '任务已完成'
       toast.show(label, 'success')
@@ -67,6 +75,10 @@ export function WorkspacePage() {
     }
   }, [refreshVersions, toast])
   const jobs = useJob(onJobSettled)
+
+  useEffect(() => {
+    if (jobs.error) setOutputExpanded(true)
+  }, [jobs.error])
 
   useEffect(() => {
     if (!problem.data || searchParams.get('language') === language) return
@@ -84,13 +96,15 @@ export function WorkspacePage() {
     setLoadedDraftKey(undefined)
     setDraftRemote('idle')
     const local = readLocalDraft(slug, language)
-    setSource(local?.source ?? implementation.starter_code)
+    sourceRef.current = local?.source ?? implementation.starter_code
+    setSource(sourceRef.current)
     setDraftSavedAt(local?.updatedAt)
     void api.drafts.get(slug, language).then((remote) => {
       if (cancelled || loadSequence !== draftLoadSequence.current) return
       const localTime = local ? new Date(local.updatedAt).valueOf() : 0
       const remoteTime = remote.updated_at ? new Date(remote.updated_at).valueOf() : 0
       if (sourceRevision.current === 0 && remote.source && remoteTime > localTime) {
+        sourceRef.current = remote.source
         setSource(remote.source)
         saveLocalDraft(slug, language, remote.source)
         setDraftSavedAt(remote.updated_at)
@@ -149,18 +163,22 @@ export function WorkspacePage() {
     setSearchParams(next)
   }
 
-  const updateSource = (next: string) => {
+  const updateSource = useCallback((next: string) => {
     sourceRevision.current += 1
+    sourceRef.current = next
     setSource(next)
-  }
+  }, [])
 
-  const startAction = async (action: Exclude<JobAction, 'rebenchmark'>, payload?: SaveVersionPayload) => {
+  const startAction = useCallback(async (action: Exclude<JobAction, 'rebenchmark'>, payload?: SaveVersionPayload) => {
+    if (!draftReady || problem.loading || problem.error || resetOpen || jobs.busy || submissionLock.current || (saveOpen && action !== 'save_version')) return
+    submissionLock.current = true
+    setOutputExpanded(true)
     try {
       await jobs.start({
         problem_id: slug,
         language: payload?.language ?? language,
         action,
-        source: payload?.source ?? source,
+        source: payload?.source ?? sourceRef.current,
         version_name: payload?.name,
         notes: payload?.notes,
         allow_duplicate: payload?.allowDuplicate,
@@ -168,8 +186,22 @@ export function WorkspacePage() {
       if (action === 'save_version') setSaveOpen(false)
     } catch (error) {
       toast.show(error instanceof Error ? error.message : '提交任务失败', 'error')
+    } finally {
+      submissionLock.current = false
     }
-  }
+  }, [draftReady, jobs.busy, jobs.start, language, problem.error, problem.loading, resetOpen, saveOpen, slug, toast])
+
+  useEffect(() => {
+    const runSample = (event: KeyboardEvent) => {
+      if (event.key !== 'Enter' || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.repeat || event.isComposing || event.defaultPrevented) return
+      if (!draftReady || problem.loading || problem.error || jobs.busy || saveOpen || resetOpen) return
+      event.preventDefault()
+      event.stopPropagation()
+      void startAction('run')
+    }
+    window.addEventListener('keydown', runSample, true)
+    return () => window.removeEventListener('keydown', runSample, true)
+  }, [draftReady, jobs.busy, problem.error, problem.loading, resetOpen, saveOpen, startAction])
 
   if (problem.loading) return <div className="page"><StatusView kind="loading" title="正在打开编程工作台" /></div>
   if (problem.error || !problem.data) {
@@ -193,16 +225,24 @@ export function WorkspacePage() {
             <span className="revision-badge">rev {detail.revision}</span>
           </div>
         </div>
-        <Link className="button secondary" to={`/problems/${encodeURIComponent(slug)}/versions?language=${language}`}>
-          <Archive size={16} />性能版本 <span className="count-badge">{languageVersionCount}</span>
-        </Link>
+        <div className="workspace-controls">
+          <button className="button secondary" type="button" title="恢复题目、代码与输出的默认比例，不会修改代码" onClick={layout.reset}>
+            <PanelsTopLeft size={16} />重置布局
+          </button>
+          <button className="button secondary" type="button" aria-pressed={focusMode} aria-controls="problem-statement" onClick={() => setFocusMode((focused) => !focused)}>
+            {focusMode ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}{focusMode ? '显示题目' : '专注编码'}
+          </button>
+          <Link className="button secondary" to={`/problems/${encodeURIComponent(slug)}/versions?language=${language}`}>
+            <Archive size={16} />性能版本 <span className="count-badge">{languageVersionCount}</span>
+          </Link>
+        </div>
       </header>
 
-      <div className="workspace-grid">
-        <section className="statement-panel panel">
+      <div className={`workspace-grid${focusMode ? ' is-focused' : ''}`} ref={layout.workspace.attach} style={layout.workspaceStyle}>
+        <section className="statement-panel panel" id="problem-statement" aria-label="题目与测量说明" hidden={focusMode}>
           <div className="tab-bar">
-            <button className={statementTab === 'statement' ? 'active' : ''} type="button" onClick={() => setStatementTab('statement')}>题目说明</button>
-            <button className={statementTab === 'protocol' ? 'active' : ''} type="button" onClick={() => setStatementTab('protocol')}>测量协议</button>
+            <button className={statementTab === 'statement' ? 'active' : ''} type="button" aria-pressed={statementTab === 'statement'} onClick={() => setStatementTab('statement')}>题目说明</button>
+            <button className={statementTab === 'protocol' ? 'active' : ''} type="button" aria-pressed={statementTab === 'protocol'} onClick={() => setStatementTab('protocol')}>测量协议</button>
           </div>
           <div className="statement-scroll">
             {statementTab === 'statement' ? (
@@ -236,39 +276,49 @@ export function WorkspacePage() {
           </div>
         </section>
 
-        <section className="editor-column">
-          <div className="editor-panel panel">
+        {!focusMode && <ResizeHandle axis="x" {...layout.statement} containerRef={layout.workspace.ref} label="调整题目与代码宽度" controls="problem-statement workspace-editor-column" />}
+
+        <section className={`editor-column${outputExpanded ? '' : ' is-output-collapsed'}`} id="workspace-editor-column" aria-label="代码与运行结果" ref={layout.column.attach} style={layout.editorStyle}>
+          <div className="editor-panel panel" id="workspace-editor">
             <div className="editor-toolbar">
               <div className="file-label"><Braces size={16} /><strong>solution{activeImplementation.file_extension}</strong><span>{activeImplementation.display_name}</span></div>
               <div className="language-switch" role="group" aria-label="实现语言">
                 {supportedLanguages.map((item) => (
-                  <button key={item} className={language === item ? 'active' : ''} type="button" disabled={jobs.busy || saveOpen} onClick={() => selectLanguage(item)}>{languageLabel(item)}</button>
+                  <button key={item} className={language === item ? 'active' : ''} type="button" aria-pressed={language === item} disabled={jobs.busy || saveOpen || resetOpen} onClick={() => selectLanguage(item)}>{languageLabel(item)}</button>
                 ))}
               </div>
-              <div className="draft-state" title={draftSavedAt ? `保存于 ${formatDate(draftSavedAt)}` : undefined}>
-                <span className={draftRemote === 'saving' ? 'pulse-dot' : 'saved-dot'} />
-                {!draftReady ? '正在读取草稿' : draftRemote === 'saving' ? '正在保存' : draftRemote === 'local-only' ? '已本地保存' : '草稿已保存'}
+              <div className="editor-tool-actions">
+                <div className="draft-state" title={draftSavedAt ? `保存于 ${formatDate(draftSavedAt)}` : undefined}>
+                  <span className={draftRemote === 'saving' ? 'pulse-dot' : 'saved-dot'} />
+                  {!draftReady ? '正在读取草稿' : draftRemote === 'saving' ? '正在保存' : draftRemote === 'local-only' ? '已本地保存' : '草稿已保存'}
+                </div>
+                <button className="text-button" type="button" disabled={!draftReady || jobs.busy || saveOpen} onClick={() => setResetOpen(true)}><RotateCcw size={14} />重置</button>
               </div>
-              <button className="text-button" type="button" disabled={!draftReady} onClick={() => setResetOpen(true)}><RotateCcw size={14} />重置</button>
             </div>
             <div className="editor-space"><CodeEditor value={source} language={language} problemId={slug} readOnly={!draftReady} onChange={updateSource} /></div>
             <div className="action-bar">
               <div className="action-group">
+                <button className="button primary" disabled={jobs.busy || !draftReady} type="button" aria-keyshortcuts="Control+Enter Meta+Enter" title="运行样例（Ctrl / ⌘ + Enter）" onClick={() => void startAction('run')}><Play size={16} />运行样例<kbd className="shortcut-hint" aria-hidden="true">Ctrl/⌘ ↵</kbd></button>
                 <button className="button secondary" disabled={jobs.busy || !draftReady} type="button" onClick={() => void startAction('compile')}><Settings2 size={16} />{language === 'torch_python' ? '代码检查' : '编译'}</button>
-                <button className="button secondary" disabled={jobs.busy || !draftReady} type="button" onClick={() => void startAction('run')}><Play size={16} />运行样例</button>
                 <button className="button secondary" disabled={jobs.busy || !draftReady} type="button" onClick={() => void startAction('validate')}><FileCheck2 size={16} />完整验证</button>
               </div>
               <button
-                className="button accent"
+                className="button secondary"
                 disabled={jobs.busy || !draftReady}
                 type="button"
                 onClick={() => { setSaveSnapshot({ language, source }); setSaveOpen(true) }}
               ><Save size={16} />保存为性能版本</button>
             </div>
           </div>
-          <section className="output-panel panel">
-            <header className="output-header"><strong>任务与输出</strong><span>输出经过清理与截断</span></header>
-            <div className="output-scroll"><JobPanel job={jobs.job} requestError={jobs.error} onClear={jobs.clear} /></div>
+          {outputExpanded && <ResizeHandle axis="y" {...layout.editor} containerRef={layout.column.ref} label="调整代码与输出高度" controls="workspace-editor workspace-output-panel" />}
+          <section className={`output-panel panel${outputExpanded ? '' : ' is-collapsed'}`} id="workspace-output-panel" aria-label="任务与输出">
+            <header className="output-header">
+              <button className="output-toggle" type="button" aria-label={outputExpanded ? '收起任务与输出' : '展开任务与输出'} aria-expanded={outputExpanded} aria-controls="workspace-output" onClick={() => setOutputExpanded((expanded) => !expanded)}>
+                {outputExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}<strong>任务与输出</strong>
+              </button>
+              <span className="output-status" role="status">{jobs.submitting ? '正在提交' : jobs.error ? '请求失败' : jobs.job ? (outputExpanded ? '' : readableStatus(jobs.job.status)) : '尚未运行'}</span>
+            </header>
+            <div className="output-scroll" id="workspace-output" hidden={!outputExpanded}><JobPanel job={jobs.job} requestError={jobs.error} onClear={jobs.clear} /></div>
           </section>
         </section>
       </div>
