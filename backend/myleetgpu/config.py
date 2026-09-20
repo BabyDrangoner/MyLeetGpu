@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import re
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -41,6 +41,35 @@ class Settings(BaseSettings):
     database_url_override: str | None = None
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8000, ge=1, le=65535)
+    cxx_bin: str = "c++"
+    colab_ssh_host: str = "colab-vscode"
+    colab_session: str = "vscode-colab"
+    colab_cli_bin: str = "colab"
+    colab_ssh_bin: str = "ssh"
+    colab_python_bin: str = "python3"
+    colab_remote_root: str = "/content/project/myleetgpu-runner"
+    colab_connect_timeout_seconds: int = Field(default=20, ge=1, le=120)
+    execution_probe_timeout_seconds: float = Field(default=180, ge=1, le=300)
+
+    @field_validator("colab_ssh_host", "colab_session")
+    @classmethod
+    def validate_colab_alias(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value):
+            raise ValueError("Colab host and session must be simple configured aliases")
+        return value
+
+    @field_validator("colab_remote_root")
+    @classmethod
+    def validate_colab_root(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if (
+            not value.startswith("/content/")
+            or ".." in path.parts
+            or len(path.parts) < 4
+            or not re.fullmatch(r"/[A-Za-z0-9_./-]+", value)
+        ):
+            raise ValueError("Colab task root must be a dedicated directory below /content")
+        return str(path)
 
     @field_validator("cuda_image", "triton_image")
     @classmethod

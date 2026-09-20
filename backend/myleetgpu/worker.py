@@ -2,36 +2,33 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import signal
 import socket
 import threading
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session, sessionmaker
 
+from myleetgpu.application.execution import failed_probe, probe_response
+from myleetgpu.application.judging import JobExecutor
+from myleetgpu.application.results import JobFailed
 from myleetgpu.config import Settings, get_settings
-from myleetgpu.domain.benchmark import Measurement, source_hash
-from myleetgpu.domain.jobs import GPU_RESOURCE, ErrorCode, JobAction, JobError, JobStatus
-from myleetgpu.domain.problems import KernelLanguage, Problem, ProblemCatalog, ProblemImplementation
-from myleetgpu.filesystem import ensure_mode
+from myleetgpu.domain.jobs import GPU_RESOURCE, ErrorCode, JobError, JobStatus
+from myleetgpu.domain.problems import KernelLanguage, ProblemCatalog
 from myleetgpu.infrastructure.database import Base, build_engine, build_session_factory
 from myleetgpu.infrastructure.logging import configure_logging
-from myleetgpu.infrastructure.models import JobRecord, VersionRecord
 from myleetgpu.infrastructure.repository import Repository
-from myleetgpu.runner.docker import DockerRunner
-from myleetgpu.runner.models import CompileResult, EnvironmentProbe, ExecutionResult, RunnerFailure
+from myleetgpu.runner.models import EnvironmentProbe, RunnerFailure
+from myleetgpu.runner.protocols import CpuEnvironmentRunner, PreparedRunner, Runner, TargetRunner
+from myleetgpu.runner.router import ExecutionRouter
 
 LOGGER = logging.getLogger("myleetgpu.worker")
-
-
-class JobFailed(RuntimeError):
-    def __init__(self, error: JobError, diagnostics: str | None = None):
-        super().__init__(error.message)
-        self.error = error
-        self.diagnostics = diagnostics
 
 
 class Worker:
@@ -40,7 +37,7 @@ class Worker:
         settings: Settings,
         catalog: ProblemCatalog,
         repository: Repository,
-        runner: DockerRunner,
+        runner: Runner,
         *,
         worker_id: str | None = None,
     ):
@@ -54,6 +51,9 @@ class Worker:
         self._last_environment_probe = 0.0
         self._lease_required = False
         self.runner.assign_owner(self.worker_id)
+        self.executor = JobExecutor(
+            settings, catalog, repository, runner, check_lease=self._assert_gpu_lease
+        )
 
     def run_forever(self) -> None:
         if not self.repository.acquire_lease(GPU_RESOURCE, self.worker_id):
@@ -62,18 +62,15 @@ class Worker:
         self._lease_thread = threading.Thread(target=self._heartbeat, daemon=True)
         self._lease_thread.start()
         try:
-            removed = self.runner.cleanup_orphan_containers()
-            if removed:
-                LOGGER.warning("removed %d orphaned runner containers", len(removed))
-            probe = self._probe_and_record_environment()
-            if not probe.healthy:
-                LOGGER.error("GPU environment is unavailable: %s", probe.error)
+            self._probe_cpu_environments()
             orphaned = self.repository.fail_orphaned_jobs(self.worker_id)
-            self._cleanup_job_ids(orphaned)
+            # Local source snapshots can be reclaimed immediately. Remote/device
+            # orphans are cleaned lazily before that provider's first real use.
+            self._cleanup_job_ids(orphaned, local_only=True)
             while not self.stopping.is_set():
                 if not self.process_next():
                     if time.monotonic() - self._last_environment_probe >= 60:
-                        self._probe_and_record_environment()
+                        self._probe_cpu_environments()
                     self.stopping.wait(self.settings.job_poll_seconds)
         finally:
             self.stopping.set()
@@ -83,6 +80,8 @@ class Worker:
             self._lease_required = False
 
     def process_next(self) -> bool:
+        if isinstance(self.runner, TargetRunner) and self._process_execution_probe():
+            return True
         job = self.repository.claim_next_job(self.worker_id)
         if job is None:
             return False
@@ -95,7 +94,19 @@ class Worker:
         }
         LOGGER.info("job started", extra=log_fields)
         try:
-            result = self._process(job, spool)
+            target = (
+                "cpu"
+                if KernelLanguage(job.language).is_cpu
+                else job.payload_json.get("execution_target", "local")
+            )
+            if isinstance(self.runner, TargetRunner):
+                if target == "colab" and not job.payload_json.get("colab_acknowledged"):
+                    raise RunnerFailure("Colab 任务缺少可信代码执行确认")
+                self.runner.select_target(target)
+            if isinstance(self.runner, PreparedRunner):
+                self.runner.prepare_target()
+            result = self.executor.execute(job, spool)
+            result["execution_target"] = target
             self.repository.transition_job(
                 job.id,
                 JobStatus.SUCCEEDED,
@@ -117,6 +128,8 @@ class Worker:
             )
             LOGGER.warning("job rejected", extra={**log_fields, "status": status.value})
         except RunnerFailure as failure:
+            if isinstance(self.runner, PreparedRunner):
+                self.runner.invalidate_preparation()
             error = JobError(
                 code=ErrorCode.RUNNER_UNHEALTHY,
                 message=str(failure),
@@ -148,550 +161,12 @@ class Worker:
         finally:
             try:
                 self.runner.cleanup_task(spool)
-            except (OSError, ValueError):
+            except (OSError, ValueError, RunnerFailure):
                 LOGGER.exception("failed to clean spool for job %s", job.id)
         return True
 
     def stop(self) -> None:
         self.stopping.set()
-
-    def _process(self, job: JobRecord, spool: Path) -> dict[str, Any]:
-        problem = self.catalog.get(job.problem_id)
-        if problem.manifest.revision != job.problem_revision:
-            raise JobFailed(
-                JobError(
-                    code=ErrorCode.INVALID_REQUEST,
-                    message="排队期间题目版本发生变化，请重新提交",
-                    stage="queued",
-                )
-            )
-        action = JobAction(job.action)
-        try:
-            implementation = problem.get_implementation(job.language)
-        except KeyError as error:
-            raise JobFailed(
-                JobError(
-                    code=ErrorCode.INVALID_REQUEST,
-                    message="题目不再支持任务指定的实现语言",
-                    stage="queued",
-                )
-            ) from error
-        if action is JobAction.REBENCHMARK:
-            return self._rebenchmark(job, spool, problem, implementation)
-
-        source_path = self._verified_source(job, spool, implementation)
-        if (
-            action is JobAction.SAVE_VERSION
-            and not job.payload_json.get("allow_duplicate")
-            and self.repository.find_duplicate_versions(
-                problem.manifest.slug, job.source_hash or "", job.language
-            )
-        ):
-            raise JobFailed(
-                JobError(
-                    code=ErrorCode.INVALID_REQUEST,
-                    message="相同源码已存在，请确认重复后重试",
-                    stage="queued",
-                )
-            )
-        validator = self.runner.compile(
-            spool,
-            problem,
-            source_path,
-            harness_kind="validator",
-            language=job.language,
-            implementation=implementation,
-        )
-        self._require_compile(validator, job.language)
-        if action is JobAction.COMPILE:
-            return {
-                "compiled": True,
-                "diagnostics": validator.diagnostics,
-                "duration_seconds": validator.duration_seconds,
-                "language": job.language,
-            }
-
-        mode = "public" if action is JobAction.RUN else "full"
-        stage_status = JobStatus.RUNNING if action is JobAction.RUN else JobStatus.VALIDATING
-        self.repository.transition_job(
-            job.id,
-            stage_status,
-            phase=mode,
-            progress=0.45 if action is JobAction.RUN else 0.35,
-            diagnostics=validator.diagnostics,
-        )
-        timeout = self._execution_timeout(problem, mode)
-        self._assert_gpu_lease()
-        self._require_runtime_environment(job.language)
-        validation = self.runner.execute(
-            spool,
-            validator.executable,
-            mode=mode,
-            timeout_seconds=timeout,  # type: ignore[arg-type]
-            language=job.language,
-        )
-        safe_correctness = self._safe_correctness(problem, mode, validation.parsed)
-        self._require_execution(validation, mode, safe_correctness)
-        if action in {JobAction.RUN, JobAction.VALIDATE}:
-            return {
-                "correctness": safe_correctness,
-                "output": validation.output if mode == "public" else None,
-                "compile_diagnostics": validator.diagnostics,
-                "language": job.language,
-            }
-
-        self.repository.transition_job(
-            job.id,
-            JobStatus.BENCHMARKING,
-            phase="benchmarking",
-            progress=0.62,
-        )
-        benchmark = self._run_benchmark(spool, problem, implementation, source_path, job.language)
-        probe = self._probe_for_language(job.language, force=True)
-        if not probe.healthy:
-            raise RunnerFailure(probe.error or "GPU environment became unhealthy")
-        environment = self.repository.save_environment(probe, force_new=True)
-        source = source_path.read_text(encoding="utf-8")
-        measurements, raw_samples = self._normalize_measurements(problem, benchmark)
-        payload = job.payload_json
-        if not payload.get("allow_duplicate") and self.repository.find_duplicate_versions(
-            problem.manifest.slug,
-            job.source_hash or source_hash(source),
-            job.language,
-        ):
-            raise JobFailed(
-                JobError(
-                    code=ErrorCode.INVALID_REQUEST,
-                    message="相同源码已在排队期间保存，请确认重复后重试",
-                    stage="benchmarking",
-                )
-            )
-        version = self.repository.create_version_with_benchmark(
-            problem_id=problem.manifest.slug,
-            problem_revision=problem.manifest.revision,
-            language=job.language,
-            name=str(payload["version_name"]),
-            notes=payload.get("notes"),
-            source_code=source,
-            source_hash=job.source_hash or source_hash(source),
-            compile_flags=self.runner.effective_compile_flags(
-                problem,
-                probe,
-                language=job.language,
-                implementation=implementation,
-            ),
-            environment_id=environment.id,
-            suite_hash=implementation.suite_hash,
-            protocol_version=problem.manifest.benchmark.protocol_version,
-            input_sizes=[item.label for item in problem.manifest.benchmark.sizes],
-            seed=problem.manifest.benchmark.suite_seed,
-            warmup=problem.manifest.benchmark.warmup,
-            iterations=problem.manifest.benchmark.iterations,
-            measurements=measurements,
-            raw_samples=raw_samples,
-        )
-        return {
-            "version_id": version.id,
-            "correctness": safe_correctness,
-            "benchmark": {"measurements": measurements},
-            "language": job.language,
-        }
-
-    def _rebenchmark(
-        self,
-        job: JobRecord,
-        spool: Path,
-        problem: Problem,
-        implementation: ProblemImplementation,
-    ) -> dict[str, Any]:
-        version_ids = list(job.payload_json.get("version_ids", []))
-        versions = self.repository.get_versions(version_ids)
-        if len(versions) != len(version_ids):
-            raise JobFailed(
-                JobError(
-                    code=ErrorCode.INVALID_REQUEST,
-                    message="一个或多个版本已不存在",
-                    stage="validating",
-                )
-            )
-        if any(version.problem_revision != problem.manifest.revision for version in versions):
-            raise JobFailed(
-                JobError(
-                    code=ErrorCode.INVALID_REQUEST,
-                    message="旧题目 revision 无法用当前 harness 重新测试",
-                    stage="validating",
-                )
-            )
-        if any(version.language != job.language for version in versions):
-            raise JobFailed(
-                JobError(
-                    code=ErrorCode.INVALID_REQUEST,
-                    message="统一重测只能包含同一种实现语言",
-                    stage="validating",
-                )
-            )
-        probe = self._probe_for_language(job.language, force=True)
-        if not probe.healthy:
-            raise RunnerFailure(probe.error or "GPU environment is unavailable")
-        environment = self.repository.save_environment(probe, force_new=True)
-        pending_rows: list[dict[str, Any]] = []
-        summaries: list[dict[str, Any]] = []
-        prepared: list[tuple[VersionRecord, Path, Path]] = []
-        self.repository.transition_job(
-            job.id,
-            JobStatus.VALIDATING,
-            phase="validating",
-            progress=0.2,
-        )
-        for index, version in enumerate(versions):
-            version_root = spool / f"version-{index + 1}"
-            version_root.mkdir(mode=0o700)
-            source_path = version_root / f"source{implementation.source_suffix}"
-            source_path.write_text(version.source_code, encoding="utf-8", newline="\n")
-            ensure_mode(source_path, 0o600)
-            validator = self.runner.compile(
-                version_root,
-                problem,
-                source_path,
-                harness_kind="validator",
-                language=job.language,
-                implementation=implementation,
-            )
-            self._require_compile(validator, job.language)
-            self._assert_gpu_lease()
-            validation = self.runner.execute(
-                version_root,
-                validator.executable,  # type: ignore[arg-type]
-                mode="full",
-                timeout_seconds=self._execution_timeout(problem, "full"),
-                language=job.language,
-            )
-            self._require_execution(
-                validation,
-                "full",
-                self._safe_correctness(problem, "full", validation.parsed),
-            )
-            prepared.append((version, version_root, source_path))
-            self.repository.transition_job(
-                job.id,
-                JobStatus.VALIDATING,
-                phase="validating",
-                progress=0.2 + 0.25 * ((index + 1) / len(versions)),
-            )
-
-        self.repository.transition_job(
-            job.id,
-            JobStatus.BENCHMARKING,
-            phase="benchmarking",
-            progress=0.5,
-        )
-        for index, (version, version_root, source_path) in enumerate(prepared):
-            benchmark = self._run_benchmark(
-                version_root,
-                problem,
-                implementation,
-                source_path,
-                job.language,
-            )
-            measurements, raw_samples = self._normalize_measurements(problem, benchmark)
-            pending_rows.append(
-                {
-                    "version_id": version.id,
-                    "environment_snapshot_id": environment.id,
-                    "suite_hash": implementation.suite_hash,
-                    "protocol_version": problem.manifest.benchmark.protocol_version,
-                    "compile_flags_json": self.runner.effective_compile_flags(
-                        problem,
-                        probe,
-                        language=job.language,
-                        implementation=implementation,
-                    ),
-                    "input_sizes_json": [item.label for item in problem.manifest.benchmark.sizes],
-                    "seed": problem.manifest.benchmark.suite_seed,
-                    "warmup": problem.manifest.benchmark.warmup,
-                    "iterations": problem.manifest.benchmark.iterations,
-                    "measurements_json": measurements,
-                    "raw_samples_json": raw_samples,
-                }
-            )
-            summaries.append({"version_id": version.id, "measurements": measurements})
-            self.repository.transition_job(
-                job.id,
-                JobStatus.BENCHMARKING,
-                phase="benchmarking",
-                progress=0.5 + 0.45 * ((index + 1) / len(versions)),
-            )
-        self.repository.add_benchmark_runs(pending_rows)
-        return {
-            "rebenchmarked": summaries,
-            "environment_fingerprint": probe.fingerprint,
-            "language": job.language,
-        }
-
-    def _run_benchmark(
-        self,
-        spool: Path,
-        problem: Problem,
-        implementation: ProblemImplementation,
-        source_path: Path,
-        language: str,
-    ) -> ExecutionResult:
-        compiled = self.runner.compile(
-            spool,
-            problem,
-            source_path,
-            harness_kind="benchmark",
-            language=language,
-            implementation=implementation,
-        )
-        self._require_compile(compiled, language)
-        self._assert_gpu_lease()
-        result = self.runner.execute(
-            spool,
-            compiled.executable,  # type: ignore[arg-type]
-            mode="benchmark",
-            timeout_seconds=min(
-                self.settings.benchmark_timeout_seconds,
-                problem.manifest.timeouts.benchmark_ms / 1000,
-            ),
-            language=language,
-        )
-        self._require_execution(result, "benchmark")
-        return result
-
-    @staticmethod
-    def _verified_source(
-        job: JobRecord, spool: Path, implementation: ProblemImplementation
-    ) -> Path:
-        path = spool / f"source{implementation.source_suffix}"
-        if not path.is_file():
-            raise JobFailed(
-                JobError(
-                    code=ErrorCode.INTERNAL_ERROR,
-                    message="任务源码快照缺失",
-                    stage="spool",
-                    retryable=True,
-                )
-            )
-        actual = source_hash(path.read_text(encoding="utf-8"))
-        if not job.source_hash or actual != job.source_hash:
-            raise JobFailed(
-                JobError(
-                    code=ErrorCode.INTERNAL_ERROR,
-                    message="任务源码快照完整性校验失败",
-                    stage="spool",
-                    retryable=False,
-                )
-            )
-        return path
-
-    @staticmethod
-    def _require_compile(result: CompileResult, language: str = "cuda_cpp") -> None:
-        if result.succeeded:
-            return
-        toolchain = {
-            KernelLanguage.CUDA_CPP.value: "NVCC 编译",
-            KernelLanguage.TRITON_PYTHON.value: "Triton/Python 提交策略预检",
-            KernelLanguage.TORCH_PYTHON.value: "PyTorch/Python 提交策略预检",
-        }.get(language, "提交预检")
-        if result.timed_out:
-            code, message = ErrorCode.TIMEOUT, f"{toolchain}超时"
-        elif result.output_limited:
-            code, message = ErrorCode.OUTPUT_LIMIT, f"{toolchain}诊断输出超过限制"
-        else:
-            code, message = ErrorCode.COMPILE_ERROR, f"{toolchain}失败"
-        raise JobFailed(JobError(code=code, message=message, stage="compiling"), result.diagnostics)
-
-    @staticmethod
-    def _require_execution(
-        result: ExecutionResult,
-        stage: str,
-        safe_correctness: dict[str, Any] | None = None,
-    ) -> None:
-        if result.succeeded:
-            return
-        if result.timed_out:
-            error = JobError(code=ErrorCode.TIMEOUT, message=f"{stage} 超时", stage=stage)
-        elif result.output_limited:
-            error = JobError(
-                code=ErrorCode.OUTPUT_LIMIT,
-                message=f"{stage} 输出超过限制",
-                stage=stage,
-            )
-        elif result.parsed and result.parsed.get("status") == "wrong_answer":
-            error = JobError(
-                code=ErrorCode.WRONG_ANSWER,
-                message="结果与参考实现不一致",
-                stage=stage,
-                details={"correctness": safe_correctness or {"status": "wrong_answer"}},
-            )
-        elif result.parsed and result.parsed.get("status") == "compile_error":
-            error = JobError(
-                code=ErrorCode.COMPILE_ERROR,
-                message="运行时编译或提交策略检查失败",
-                stage=stage,
-                details={"result": {"status": "compile_error"}},
-            )
-        else:
-            error = JobError(
-                code=ErrorCode.RUNTIME_ERROR,
-                message=f"{stage} 运行失败",
-                stage=stage,
-                details={
-                    "returncode": result.returncode,
-                    "result": safe_correctness or {"status": result.parsed.get("status")}
-                    if result.parsed
-                    else None,
-                },
-            )
-        diagnostics = result.output if stage == "public" else None
-        raise JobFailed(error, diagnostics)
-
-    @staticmethod
-    def _safe_correctness(
-        problem: Problem,
-        mode: str,
-        parsed: dict[str, Any] | None,
-    ) -> dict[str, Any] | None:
-        if parsed is None:
-            return None
-        if mode == "public":
-            return parsed
-
-        allowed_statuses = {"passed", "wrong_answer", "runtime_error"}
-        status = str(parsed.get("status", "runtime_error"))
-        if status not in allowed_statuses:
-            status = "runtime_error"
-        raw_cases = parsed.get("cases")
-        safe_cases: list[dict[str, Any]] = []
-        public_cases = problem.manifest.public.cases
-        if isinstance(raw_cases, list):
-            for index, raw_case in enumerate(raw_cases):
-                if not isinstance(raw_case, dict):
-                    continue
-                is_public = index < len(public_cases)
-                name = (
-                    str(public_cases[index].get("name", f"sample_{index + 1}"))
-                    if is_public
-                    else f"internal_case_{index - len(public_cases) + 1}"
-                )
-                passed = raw_case.get("passed") is True
-                safe_case: dict[str, Any] = {
-                    "name": name,
-                    "scope": "public" if is_public else "internal",
-                    "passed": passed,
-                }
-                if not passed:
-                    safe_case["message"] = "用例未通过"
-                safe_cases.append(safe_case)
-
-        if safe_cases:
-            passed_count = sum(item["passed"] is True for item in safe_cases)
-            summary = {
-                "total": len(safe_cases),
-                "passed": passed_count,
-                "failed": len(safe_cases) - passed_count,
-            }
-        else:
-            raw_summary = parsed.get("summary")
-            source = raw_summary if isinstance(raw_summary, dict) else parsed
-            total = source.get("total", 0)
-            passed_count = source.get("passed", 0)
-            total = total if isinstance(total, int) and total >= 0 else 0
-            passed_count = (
-                passed_count if isinstance(passed_count, int) and 0 <= passed_count <= total else 0
-            )
-            summary = {
-                "total": total,
-                "passed": passed_count,
-                "failed": total - passed_count,
-            }
-        return {"status": status, "cases": safe_cases, "summary": summary}
-
-    @staticmethod
-    def _normalize_measurements(
-        problem: Problem, result: ExecutionResult
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        parsed = result.parsed or {}
-        protocol = str(parsed.get("protocol_version", ""))
-        expected_protocol = problem.manifest.benchmark.protocol_version
-        if protocol != expected_protocol:
-            raise JobFailed(
-                JobError(
-                    code=ErrorCode.INTERNAL_ERROR,
-                    message="benchmark protocol version mismatch",
-                    stage="benchmarking",
-                )
-            )
-        raw = parsed.get("measurements")
-        if not isinstance(raw, list) or len(raw) != len(problem.manifest.benchmark.sizes):
-            raise JobFailed(
-                JobError(
-                    code=ErrorCode.INTERNAL_ERROR,
-                    message="benchmark returned an invalid measurement set",
-                    stage="benchmarking",
-                )
-            )
-        normalized: list[dict[str, Any]] = []
-        samples: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for item in raw:
-            if not isinstance(item, dict):
-                raise JobFailed(
-                    JobError(
-                        code=ErrorCode.INTERNAL_ERROR,
-                        message="benchmark returned a malformed measurement",
-                        stage="benchmarking",
-                    )
-                )
-            label = str(item.get("label", ""))
-            if label in seen:
-                raise JobFailed(
-                    JobError(
-                        code=ErrorCode.INTERNAL_ERROR,
-                        message="benchmark returned duplicate input sizes",
-                        stage="benchmarking",
-                    )
-                )
-            seen.add(label)
-            measurement = Measurement(
-                size=label,
-                samples_ms=item.get("samples_ms", []),
-                inner_repetitions=item.get("inner_repetitions", 1),
-            ).with_statistics()
-            if len(measurement.samples_ms) != problem.manifest.benchmark.iterations:
-                raise JobFailed(
-                    JobError(
-                        code=ErrorCode.INTERNAL_ERROR,
-                        message="benchmark sample count does not match the manifest",
-                        stage="benchmarking",
-                    )
-                )
-            normalized.append(measurement.model_dump(mode="json"))
-            samples.append({"size": label, "samples_ms": measurement.samples_ms[:200]})
-        expected_labels = [item.label for item in problem.manifest.benchmark.sizes]
-        if [item["size"] for item in normalized] != expected_labels:
-            raise JobFailed(
-                JobError(
-                    code=ErrorCode.INTERNAL_ERROR,
-                    message="benchmark input sizes do not match the manifest",
-                    stage="benchmarking",
-                )
-            )
-        return normalized, samples
-
-    def _execution_timeout(self, problem: Problem, mode: str) -> float:
-        manifest_timeout = (
-            problem.manifest.timeouts.public_ms
-            if mode == "public"
-            else problem.manifest.timeouts.validation_ms
-        )
-        configured = (
-            self.settings.run_timeout_seconds
-            if mode == "public"
-            else self.settings.validate_timeout_seconds
-        )
-        return min(configured, manifest_timeout / 1000)
 
     def _heartbeat(self) -> None:
         while not self.stopping.wait(5):
@@ -727,6 +202,8 @@ class Worker:
             LOGGER.exception("failed to stop containers after lease loss")
 
     def _probe_and_record_environment(self) -> EnvironmentProbe:
+        if isinstance(self.runner, TargetRunner):
+            self.runner.select_target(self.repository.execution_settings()["target"])
         probe = self.runner.probe_environment(
             force=True,
             ignore_circuit_breaker=True,
@@ -735,54 +212,109 @@ class Worker:
         self._last_environment_probe = time.monotonic()
         return probe
 
-    def _probe_for_language(self, language: str, *, force: bool) -> EnvironmentProbe:
-        if language == KernelLanguage.TRITON_PYTHON.value:
-            return self.runner.probe_triton_environment(force=force)
-        if language == KernelLanguage.TORCH_PYTHON.value:
-            return self.runner.probe_torch_environment(force=force)
-        return self.runner.probe_environment(force=force)
+    def _process_execution_probe(self) -> bool:
+        request = self.repository.claim_execution_probe()
+        if request is None:
+            return False
+        try:
+            self._assert_gpu_lease()
+            assert isinstance(self.runner, TargetRunner)
+            self.runner.select_target(request.target)
+            if isinstance(self.runner, PreparedRunner):
+                self.runner.prepare_target()
+            probe = self.runner.probe_connection(request.language)
+            if not probe.healthy and isinstance(self.runner, PreparedRunner):
+                self.runner.invalidate_preparation()
+            self.repository.save_environment(probe)
+            result = probe_response(probe)
+        except RunnerFailure as error:
+            if isinstance(self.runner, PreparedRunner):
+                self.runner.invalidate_preparation()
+            probe = failed_probe(
+                request.target, request.language, str(error), self.settings.cuda_image
+            )
+            self.repository.save_environment(probe)
+            result = probe_response(probe)
+        except Exception:
+            if isinstance(self.runner, PreparedRunner):
+                self.runner.invalidate_preparation()
+            LOGGER.exception("execution environment probe failed")
+            probe = failed_probe(
+                request.target,
+                request.language,
+                "运行环境探测失败，请检查 Worker 日志和已配置的执行连接",
+                self.settings.cuda_image,
+            )
+            self.repository.save_environment(probe)
+            result = probe_response(probe)
+        self.repository.complete_execution_probe(request.id, result)
+        return True
 
-    def _require_runtime_environment(self, language: str) -> EnvironmentProbe:
-        probe = self._probe_for_language(language, force=False)
-        # Make a language-specific status observation visible even for ordinary
-        # run/validate jobs. Repository deduplication keeps this mutable status
-        # row separate from immutable benchmark snapshots.
-        self.repository.save_environment(probe)
-        if not probe.healthy:
-            raise RunnerFailure(probe.error or f"{language} runtime is unavailable")
-        return probe
+    def _probe_cpu_environments(self) -> None:
+        """Record CPU readiness even when the configured GPU provider is unavailable."""
+        self._last_environment_probe = time.monotonic()
+        if not isinstance(self.runner, CpuEnvironmentRunner):
+            return
+        if isinstance(self.runner, TargetRunner):
+            try:
+                self.runner.select_target("cpu")
+            except RunnerFailure:
+                LOGGER.warning("configured router has no CPU execution adapter")
+                return
+        for language in (KernelLanguage.CPP, KernelLanguage.PYTHON):
+            try:
+                probe = self.runner.probe_cpu_environment(language.value, force=True)
+                self.repository.save_environment(probe)
+            except (OSError, RunnerFailure):
+                LOGGER.warning("CPU toolchain probe failed for %s", language, exc_info=True)
 
-    def _cleanup_job_ids(self, job_ids: list[str]) -> None:
+    def _cleanup_job_ids(self, job_ids: list[str], *, local_only: bool = False) -> None:
         for job_id in job_ids:
             path = self.settings.jobs_dir / job_id
             try:
+                if local_only:
+                    resolved = path.resolve()
+                    if resolved.parent != self.settings.jobs_dir.resolve() or not resolved.name:
+                        raise ValueError("orphan source path escaped the configured job spool")
+                    if resolved.exists():
+                        shutil.rmtree(resolved)
+                    continue
+                if isinstance(self.runner, TargetRunner):
+                    job = self.repository.get_job(job_id)
+                    target = job.payload_json.get("execution_target", "local") if job else "local"
+                    self.runner.select_target(target)
                 self.runner.cleanup_task(path)
-            except (OSError, ValueError):
+            except (OSError, ValueError, RunnerFailure):
                 LOGGER.exception("failed to clean orphaned job %s", job_id)
 
 
-def create_worker() -> Worker:
-    settings = get_settings()
+@contextmanager
+def create_worker(settings: Settings | None = None) -> Iterator[Worker]:
+    """Own process resources, including failed startup and exceptional shutdown."""
+    settings = settings or get_settings()
     settings.ensure_directories()
     engine = build_engine(settings)
-    Base.metadata.create_all(engine)
-    factory: sessionmaker[Session] = build_session_factory(engine)
-    catalog = ProblemCatalog(settings.problems_dir).load()
-    return Worker(settings, catalog, Repository(factory), DockerRunner(settings))
+    try:
+        Base.metadata.create_all(engine)
+        factory: sessionmaker[Session] = build_session_factory(engine)
+        catalog = ProblemCatalog(settings.problems_dir).load()
+        yield Worker(settings, catalog, Repository(factory), ExecutionRouter(settings))
+    finally:
+        engine.dispose()
 
 
 def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
-    worker = create_worker()
+    with create_worker(settings) as worker:
 
-    def stop_worker(_signum: int, _frame: Any) -> None:
-        worker.stop()
+        def stop_worker(_signum: int, _frame: Any) -> None:
+            worker.stop()
 
-    signal.signal(signal.SIGTERM, stop_worker)
-    signal.signal(signal.SIGINT, stop_worker)
-    LOGGER.info("worker %s started", worker.worker_id)
-    worker.run_forever()
+        signal.signal(signal.SIGTERM, stop_worker)
+        signal.signal(signal.SIGINT, stop_worker)
+        LOGGER.info("worker %s started", worker.worker_id)
+        worker.run_forever()
 
 
 if __name__ == "__main__":

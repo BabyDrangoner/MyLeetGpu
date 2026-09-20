@@ -3,9 +3,15 @@ import { Link, NavLink, Outlet, useLocation } from 'react-router-dom'
 import { api } from '../api/client'
 import { useAsync } from '../hooks/useAsync'
 import { useTheme } from '../hooks/useTheme'
+import { ExecutionSettingsProvider, executionTargetLabel, useExecutionSettings } from '../hooks/useExecutionSettings'
 
 export function AppShell() {
-  const environment = useAsync(() => api.environment(), [])
+  return <ExecutionSettingsProvider><AppShellContent /></ExecutionSettingsProvider>
+}
+
+function AppShellContent() {
+  const execution = useExecutionSettings()
+  const environment = useAsync(() => api.environment(), [execution?.settings?.target, execution?.settings?.updated_at])
   const { pathname } = useLocation()
   const { theme, toggleTheme } = useTheme()
   const healthy = environment.data?.healthy ?? environment.data?.status === 'healthy'
@@ -18,7 +24,7 @@ export function AppShell() {
       : pathname.startsWith('/problems/')
         ? '题目 / 编程工作台'
         : '题目库'
-  const environmentLabel = environment.loading ? '检查环境中' : healthy ? '运行环境就绪' : '查看环境状态'
+  const environmentLabel = environment.loading ? '检查 GPU 环境中' : healthy ? 'GPU 环境就绪' : '查看 GPU 环境状态'
   const themeLabel = theme === 'light' ? '切换到深色模式' : '切换到浅色模式'
 
   return (
@@ -47,7 +53,7 @@ export function AppShell() {
             <span aria-hidden="true" className={`health-dot ${environment.loading ? 'checking' : healthy ? 'healthy' : 'unhealthy'}`} />
             <span>{environmentLabel}</span>
           </div>
-          <small>{environment.data?.gpu_name ?? environment.data?.gpu ?? (environment.error ? 'API 未连接' : 'GPU / CPU 诊断')}</small>
+          <small>{environment.data?.gpu_name ?? environment.data?.gpu ?? (environment.error ? 'GPU 状态不可用' : 'CPU 题不受 GPU 状态影响')}</small>
         </NavLink>
         <div className="sidebar-footer">
           <a className="sidebar-link" href="https://github.com/BabyDrangoner/MyLeetGpu" target="_blank" rel="noreferrer" aria-label="项目仓库（新窗口打开）" title="项目仓库（新窗口打开）">
@@ -61,8 +67,9 @@ export function AppShell() {
         <header className="topbar">
           <span className="topbar-location">{locationLabel}</span>
           <div className="topbar-actions">
-            <span className="mode-indicator" title={localMode ? `${hostname} · 本地模式` : `${hostname} · 认证局域网`}>
-              {localMode ? '本地模式' : '认证局域网'}
+            <Link className="execution-target-badge" to="/environment" title="设置 GPU 题执行位置；CPU 题始终在 Worker 本机执行" aria-label={`GPU 执行位置：${executionTargetLabel(execution?.settings?.target)}`}>GPU：{executionTargetLabel(execution?.settings?.target)}</Link>
+            <span className="mode-indicator" title={localMode ? `${hostname} · API 本地连接，与 GPU 执行位置无关` : `${hostname} · 认证局域网 API`}>
+              {localMode ? '本地 API' : '局域网 API'}
             </span>
             <button className="theme-toggle" type="button" onClick={toggleTheme} aria-label={themeLabel} title={themeLabel}>
               {theme === 'light' ? <Moon size={17} aria-hidden="true" /> : <Sun size={17} aria-hidden="true" />}

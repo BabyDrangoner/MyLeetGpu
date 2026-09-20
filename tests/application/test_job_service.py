@@ -80,7 +80,7 @@ def test_submission_writes_normalized_private_snapshot_but_not_source_to_job_rec
     assert stat.S_IMODE(spool.stat().st_mode) == 0o700
     assert stat.S_IMODE(snapshot.stat().st_mode) == 0o600
     assert job.source_hash == source_hash(source)
-    assert job.payload_json == {}
+    assert job.payload_json == {"execution_target": "local", "colab_acknowledged": False}
     assert not hasattr(job, "source_code")
 
     persisted = repository.get_job(job.id)
@@ -191,6 +191,8 @@ def test_save_version_submission_only_queues_work_and_freezes_click_time_source(
 
     assert job.action == "save_version"
     assert job.payload_json == {
+        "execution_target": "local",
+        "colab_acknowledged": False,
         "version_name": "tuned reduction",
         "notes": "kept only if validation and benchmark pass",
         "allow_duplicate": False,
@@ -293,7 +295,11 @@ def test_rebenchmark_accepts_only_existing_unique_versions_of_the_problem(
     )
 
     assert job.source_hash is None
-    assert job.payload_json == {"version_ids": [first.id, second.id]}
+    assert job.payload_json == {
+        "version_ids": [first.id, second.id],
+        "execution_target": "local",
+        "colab_acknowledged": False,
+    }
     assert list(Path(job.spool_path).iterdir()) == []  # type: ignore[arg-type]
 
     for invalid in ([], [first.id, first.id], [first.id, "missing"]):

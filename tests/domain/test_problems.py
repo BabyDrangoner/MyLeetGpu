@@ -28,7 +28,8 @@ TORCH_ENTRYPOINTS = {
     "multi-head-attention": "MultiHeadAttention",
     "grouped-query-attention": "GroupedQueryAttention",
 }
-EXPECTED_SLUGS = KERNEL_SLUGS | TORCH_SLUGS
+CPU_SLUGS = {"online-softmax"}
+EXPECTED_SLUGS = KERNEL_SLUGS | TORCH_SLUGS | CPU_SLUGS
 
 
 @pytest.fixture(scope="module")
@@ -40,9 +41,43 @@ def load_raw_manifest(slug: str = "vector-addition") -> dict[str, object]:
     return yaml.safe_load((PROBLEMS_ROOT / slug / "problem.yaml").read_text(encoding="utf-8"))
 
 
-def test_catalog_loads_all_ten_builtin_original_problems(catalog: ProblemCatalog) -> None:
-    assert len(catalog) == 10
+def test_catalog_loads_all_builtin_original_problems(catalog: ProblemCatalog) -> None:
+    assert len(catalog) == len(EXPECTED_SLUGS)
     assert {problem.manifest.slug for problem in catalog.list()} == EXPECTED_SLUGS
+
+
+def test_online_softmax_cpu_implementations_expose_language_specific_contracts(
+    catalog: ProblemCatalog,
+) -> None:
+    problem = catalog.get("online-softmax")
+    assert problem.supported_languages == (KernelLanguage.CPP, KernelLanguage.PYTHON)
+    cpp, python = (problem.get_implementation(language) for language in ("cpp", "python"))
+    assert cpp.editor_language == "cpp"
+    assert cpp.source_suffix == ".cpp"
+    assert cpp.header_path and cpp.header_path.is_file()
+    assert cpp.toolchain_profile == "cpp_cpu_v1"
+    assert cpp.compile_flags == ["-std=c++17", "-O3"]
+    assert python.editor_language == "python"
+    assert python.source_suffix == ".py"
+    assert python.header_path is None
+    assert python.toolchain_profile == "python_cpu_v1"
+    assert python.compile_flags == []
+    assert cpp.language.is_cpu and python.language.is_cpu
+    assert not any(
+        language.is_cpu
+        for language in (
+            KernelLanguage.CUDA_CPP,
+            KernelLanguage.TRITON_PYTHON,
+            KernelLanguage.TORCH_PYTHON,
+        )
+    )
+
+
+def test_cpu_cpp_manifest_rejects_arbitrary_compiler_flags() -> None:
+    manifest = load_raw_manifest("online-softmax")
+    manifest["implementations"]["cpp"]["compiler"]["allowed_flags"].append("-include/tmp/secret")
+    with pytest.raises(ValidationError, match="compiler flags are not allowed"):
+        ProblemManifest.model_validate(manifest)
 
 
 def test_new_kernel_protocols_cover_their_defining_operations_and_boundaries(

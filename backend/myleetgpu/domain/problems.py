@@ -14,6 +14,12 @@ class KernelLanguage(StrEnum):
     CUDA_CPP = "cuda_cpp"
     TRITON_PYTHON = "triton_python"
     TORCH_PYTHON = "torch_python"
+    CPP = "cpp"
+    PYTHON = "python"
+
+    @property
+    def is_cpu(self) -> bool:
+        return self in {KernelLanguage.CPP, KernelLanguage.PYTHON}
 
 
 class StrictManifestModel(BaseModel):
@@ -108,6 +114,28 @@ class TritonRuntimeManifest(StrictManifestModel):
     syntax_check: Literal["py_compile"] = "py_compile"
 
 
+class CppCompilerManifest(StrictManifestModel):
+    executable: Literal["c++"] = "c++"
+    standard: Literal["c++17", "c++20"] = "c++17"
+    optimization: Literal["O2", "O3"] = "O3"
+    allowed_flags: list[str] = Field(default_factory=lambda: ["-std=c++17", "-O3"], max_length=16)
+    include_paths: list[str] = Field(default_factory=list, max_length=8)
+
+    @field_validator("allowed_flags")
+    @classmethod
+    def enforce_flag_allowlist(cls, values: list[str]) -> list[str]:
+        unknown = set(values) - {"-std=c++17", "-std=c++20", "-O2", "-O3"}
+        if unknown:
+            raise ValueError(f"compiler flags are not allowed: {sorted(unknown)}")
+        return values
+
+
+class PythonRuntimeManifest(StrictManifestModel):
+    profile: Literal["python_cpu_v1"] = "python_cpu_v1"
+    executable: Literal["python3"] = "python3"
+    syntax_check: Literal["py_compile"] = "py_compile"
+
+
 class TorchRuntimeManifest(StrictManifestModel):
     profile: Literal["torch_cuda_v1"] = "torch_cuda_v1"
     executable: Literal["python3"] = "python3"
@@ -144,8 +172,32 @@ class TorchImplementationManifest(StrictManifestModel):
     runtime: TorchRuntimeManifest = Field(default_factory=TorchRuntimeManifest)
 
 
+class CppImplementationManifest(StrictManifestModel):
+    language: Literal[KernelLanguage.CPP]
+    starter: str
+    statement_appendix: str | None = None
+    source_suffix: Literal[".cpp"] = ".cpp"
+    signature: SignatureManifest
+    harness: HarnessManifest
+    compiler: CppCompilerManifest = Field(default_factory=CppCompilerManifest)
+
+
+class PythonImplementationManifest(StrictManifestModel):
+    language: Literal[KernelLanguage.PYTHON]
+    starter: str
+    statement_appendix: str | None = None
+    source_suffix: Literal[".py"] = ".py"
+    signature: PythonSignatureManifest
+    harness: HarnessManifest
+    runtime: PythonRuntimeManifest = Field(default_factory=PythonRuntimeManifest)
+
+
 ImplementationManifest = Annotated[
-    CudaImplementationManifest | TritonImplementationManifest | TorchImplementationManifest,
+    CudaImplementationManifest
+    | TritonImplementationManifest
+    | TorchImplementationManifest
+    | CppImplementationManifest
+    | PythonImplementationManifest,
     Field(discriminator="language"),
 ]
 
@@ -230,18 +282,26 @@ class ProblemImplementation:
         self,
         problem: Problem,
         manifest: (
-            CudaImplementationManifest | TritonImplementationManifest | TorchImplementationManifest
+            CudaImplementationManifest
+            | TritonImplementationManifest
+            | TorchImplementationManifest
+            | CppImplementationManifest
+            | PythonImplementationManifest
         ),
     ):
         self.problem = problem
         self.manifest = manifest
         self.language = KernelLanguage(manifest.language)
         self.source_suffix = manifest.source_suffix
-        self.editor_language = "cpp" if self.language is KernelLanguage.CUDA_CPP else "python"
+        self.editor_language = (
+            "cpp" if self.language in {KernelLanguage.CUDA_CPP, KernelLanguage.CPP} else "python"
+        )
         self.display_name = {
             KernelLanguage.CUDA_CPP: "CUDA C++",
             KernelLanguage.TRITON_PYTHON: "Triton Python",
             KernelLanguage.TORCH_PYTHON: "PyTorch Python",
+            KernelLanguage.CPP: "C++ (CPU)",
+            KernelLanguage.PYTHON: "Python (CPU)",
         }[self.language]
         self.signature = manifest.signature
         self.starter_path = problem._resolve_file(manifest.starter)
@@ -257,10 +317,12 @@ class ProblemImplementation:
             else None
         )
 
-        if isinstance(manifest, CudaImplementationManifest):
+        if isinstance(manifest, CudaImplementationManifest | CppImplementationManifest):
             self.header_path: Path | None = problem._resolve_file(manifest.signature.header)
             self.compile_flags = [*manifest.compiler.allowed_flags]
-            self.toolchain_profile = "cuda_nvcc_v1"
+            self.toolchain_profile = (
+                "cpp_cpu_v1" if isinstance(manifest, CppImplementationManifest) else "cuda_nvcc_v1"
+            )
         else:
             self.header_path = None
             self.compile_flags = []

@@ -217,6 +217,44 @@ make stop
 
 正常停止会保留草稿、手动版本和 benchmark。不要随意使用 `docker compose down -v`；删除 volume 可能丢失持久数据。
 
+### 4.5 在线切换本地 GPU / Colab
+
+打开“运行环境”，选择“本地 GPU”或“Colab”，按需测试连接，再保存设置。选择保存在本机数据库，刷新页面或重启后保留；每个新任务在提交时记录执行位置，因此切换设置不会把已排队或正在运行的任务转移到另一台设备，也不会覆盖代码草稿。旧任务缺少位置字段时仍按本地执行。
+
+本地模式继续使用原有受限 Docker Runner。Colab 模式使用服务端配置的 `colab-vscode` SSH 别名和已存在的 `vscode-colab` 会话；不接受网页输入任意 SSH 主机、密钥、OAuth token 或 shell 命令。平台不会自动创建、重置或停止 Colab 计算实例。缺少 GPU、NVCC、PyTorch、Triton 或 SSH 接口时直接报告失败，不会悄悄回退到本地或 CPU。
+
+Colab 连接必须先由操作者在运行 Worker 的宿主机配置好。先确认 `colab --auth oauth2 status -s vscode-colab` 显示既有 GPU 会话，再执行 `ssh colab-vscode true` 建立已配置的 OpenSSH ControlMaster，随后 `ssh -O check colab-vscode` 应成功。平台只复用已建立的 ControlMaster，并关闭 ProxyCommand 回退；即使会话或连接在探测后消失，也只会失败，不会触发 CLI 隐式创建实例。当前方案推荐在配置了 Colab CLI 与 SSH 的用户账户下，原生启动 API 和 Worker（不要求本机有 GPU）。安装依赖后，可一键后台启动全部本机服务：
+
+```bash
+make dev-up       # 数据库迁移 + API + Worker + 前端；重复执行不会重复启动
+make dev-status   # 查看进程和服务状态
+make dev-down     # 仅停止受管理的本机服务，不停止 Colab，不删除持久数据
+```
+
+启动日志和进程状态保存在 `data/dev-services/`。`dev-up` 不创建 Colab 会话、不建立 SSH，也不会自动切换已保存的执行位置。即使 GPU 暂时不可用，网页和 API 仍可启动，GPU 就绪状态需在“运行环境”页单独确认。首次安装依赖使用 `make install`；如需分别在前台调试三个服务，仍可使用：
+
+```bash
+make install
+make migrate
+make dev-api      # 终端 1，默认 127.0.0.1:8000
+make dev-worker   # 终端 2，与 API 使用相同 .env / data 目录
+make dev-web      # 终端 3，默认 127.0.0.1:3000
+```
+
+如 CLI 不在 PATH 中，在本机未提交的 `.env` 中设置 `MYLEETGPU_COLAB_CLI_BIN` 为其绝对路径。可配置的服务器字段见 `.env.example`：SSH 别名、会话名、CLI/Python 路径和专属临时根目录；默认根目录是 `/content/project/myleetgpu-runner`。不要把私钥或缓存的 OAuth 凭据提交到项目、粘贴进网页或拷贝进镜像。默认 Compose 服务没有挂载宿主 SSH/Colab 配置，不能直接访问宿主别名；不要为图方便把整个用户目录或 Docker socket 暴露给远端提交程序。
+
+“测试连接”由 Worker 串行执行，避免在验证和 benchmark 期间插入额外 GPU 工作。Worker 未运行时会明确提示；等待超时会取消尚未开始的探测。探测临时选中的位置不会自动保存设置。网页显示的环境状态按执行位置和语言区分，切换后不会把另一端的旧快照标为当前环境就绪。
+
+Colab 执行中发生设备异常时会单独熔断，不影响本地 Runner。连接恢复后在网页测试对应语言，会清理本安装遗留的远端任务、重新执行真实健康检查，仅成功后解除熔断。命令行 `recover-runner` 使用当前保存的位置，可用 `--target local` / `--target colab` 明确指定；为避免与 GPU 任务并发，先停止 Worker 再执行命令行探测或恢复。
+
+**Colab 安全边界：** 保存 Colab 设置前必须确认仅提交可信代码。源码、平台 harness 和必要的提交策略文件会经已有 SSH 连接传到专属任务目录，不会上传本机工作区或认证资料。远端使用原生子进程、清理后的环境变量、超时/输出限制和任务级清理；这些措施不等同于 Docker 或多租户沙箱，也不保证隔离整个 Colab 文件系统、网络或显存。不要在存有敏感数据、挂载私人 Drive 的会话中运行不可信代码。仅供可信单用户使用，不得公开暴露。
+
+Colab 环境采用该会话实际安装的工具链，不冒充本地固定镜像。环境指纹包含执行位置和真实硬件/工具链信息，跨本地与 Colab 的版本不能作为同环境 speedup；若要统一比较，请选择目标位置后重新 benchmark。`/content` 为临时存储：任务结束清理平台自己的任务文件，不删除其他项目，也不会停止会话；长期保留的数据仍在本机数据库。
+
+如果连接出现 `404 /colab/ssh`，表示当前实例未提供 SSH 接口，需要先备份 `/content` 后由操作者明确授权重建支持 SSH 的实例。`401` 应重新完成认证，`429` 应检查已存在的 OpenSSH ControlMaster 或其他占用连接；不要删除 token、强杀未知 SSH/VS Code 进程或自动新建计算实例。
+
+真实 GPU 验收：确认既有 SSH 会话和主连接可用、没有其他 GPU 任务后，停止 Worker 并运行 `make test-colab`。该命令实际编译、验证和 benchmark CUDA、Triton、MHA、GQA 的 starter，不会回退为模拟测试，也不会新建运行时。默认测试只运行 CPU-only 协议/路由测试，远端 GPU 验收必须显式启用；未连接时不能把这部分标为通过。
+
 ## 5. 日常使用
 
 ### 5.1 选择题目与编辑代码
@@ -227,10 +265,10 @@ make stop
 
 拖动题面与代码之间的竖向分隔线，可调整左右宽度；拖动代码与输出之间的横向分隔线，可调整上下高度。布局比例会保存在当前浏览器，刷新或切换题目后继续使用。双击某条分隔线恢复该方向的默认比例，点击「重置布局」恢复全部比例（不修改代码）。分隔线支持鼠标、触控及键盘：`Tab` 聚焦后用对应方向键微调，按住 `Shift` 加速，`Home` / `End` 调至允许范围的两端，`Enter` 恢复默认。专注模式、输出收起和小屏适配不会清除已保存的比例；窄屏仅显示上下分隔线。
 
-1. 在题目列表选择当前十道内置题之一：Vector Addition、Matrix Transpose、Sum Reduction、Max Reduction、Softmax、Matrix Multiplication、Top-K 和 Top-P 分别提供 CUDA C++ 与 Triton (Python) starter；多头自注意力（MHA）和分组查询自注意力（GQA）提供 PyTorch (Python) class starter。
-2. 用编辑器顶部的语言切换器选择当前题目支持的实现。URL 会保留 `language=cuda_cpp`、`language=triton_python` 或 `language=torch_python`，刷新和进入性能页时仍能回到同一语言；语言切换器不会显示当前题目没有声明的实现。
+1. 在题目列表选择当前十一道内置题之一：Vector Addition、Matrix Transpose、Sum Reduction、Max Reduction、Softmax、Matrix Multiplication、Top-K 和 Top-P 分别提供 CUDA C++ 与 Triton (Python) starter；多头自注意力（MHA）和分组查询自注意力（GQA）提供 PyTorch (Python) class starter；Online Softmax 提供普通 CPU C++17 / Python 标准库 starter，可在“CPU 算法题”筛选中找到。
+2. 用编辑器顶部的语言切换器选择当前题目支持的实现。URL 保留 `language`（`cuda_cpp`、`triton_python`、`torch_python`、`cpp` 或 `python`），刷新和进入性能页时仍能回到同一语言；语言切换器不会显示当前题目没有声明的实现。
 3. 阅读当前语言的入口签名、补充说明、约束和浮点容差。CUDA 不要自行提供 `main`；Triton 可以定义多个 `@triton.jit` Kernel，但必须保留可调用的 Python `solve(...)`；PyTorch MHA/GQA 只实现 starter 指定的普通 class 及 `forward(X, isCasual)`。两种 Python 实现都必须遵守题面列出的受限语法。
-4. 在 Monaco Editor 中编辑 `.cu` 或 `.py`。编辑器会分别保存当前题目、当前语言的草稿。
+4. 在 Monaco Editor 中编辑 `.cu`、`.cpp` 或 `.py`。编辑器会分别保存当前题目、当前语言的草稿。
 5. “重置代码”只会把当前语言的编辑内容恢复为该 revision 的 starter；确认前检查是否仍需要未保存修改。
 
 Triton `solve` 接收 GPU 0 上连续存放的 `torch.float32` Tensor 和题目声明的标量参数。平台已经进入受控的 `torch.cuda.stream(stream)` 上下文；直接把 Kernel launch 到当前 stream，写入平台提供的输出 Tensor，并返回 `None`。`solve` 只能做字面量/标量 launch 参数计算、`triton.cdiv`、`triton.next_power_of_2`、当前文件 JIT Kernel launch，以及 Sum Reduction 题明确允许的 `output.zero_()`；不要把 Tensor 移到 CPU、替换输出、调用设备级同步或依赖默认 stream。每道题的 Triton 补充说明会显示准确签名和白名单边界。
@@ -244,6 +282,8 @@ MHA/GQA 从旧的四 Tensor `solve` 升级到 revision 2 class 接口后，已�
 直接调用 API 时，草稿 GET/PUT、`POST /api/jobs` 和重复源码查询若省略 `language`，都使用题目 manifest 的 `default_language`，而不是一律回退到 CUDA；因此 MHA/GQA 会选中 `torch_python`。`GET /api/environment` 是例外：省略 `language` 时仍默认查询 `cuda_cpp` 环境。
 
 ### 5.2 编译与代码检查
+
+CPU Online Softmax 使用普通 C++17 / Python 标准库，始终在本机 CPU 执行，无须配置 GPU 或 Colab。C++ 可通过 `MYLEETGPU_CXX_BIN` 指定编译器；Python 使用后端解释器的 `-I -S` 标准库模式，不隐式安装第三方包。任务有进程时间和输出限制，但原生执行不是安全沙箱，仍具有本机用户权限；只提交可信代码。CPU 运行状态、编译器、解释器和性能指纹独立记录，可在“运行环境”中探测两种 CPU 语言。
 
 CUDA/Triton 点击“编译”、PyTorch 点击“代码检查”，都只执行当前语言的无 GPU 预检查：
 

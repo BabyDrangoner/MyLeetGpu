@@ -7,13 +7,15 @@ export interface LanguageMetadata {
   fileName: string
   fileExtension: ProblemImplementation['file_extension']
   diagnosticsLabel: string
-  runtime: 'cuda' | 'triton' | 'torch'
+  runtime: 'cuda' | 'triton' | 'torch' | 'cpu'
 }
 
 export const implementationLanguages = [
   'cuda_cpp',
   'triton_python',
   'torch_python',
+  'cpp',
+  'python',
 ] as const satisfies readonly KernelLanguage[]
 
 export const languageMetadata = {
@@ -44,6 +46,24 @@ export const languageMetadata = {
     diagnosticsLabel: 'Python / PyTorch 诊断',
     runtime: 'torch',
   },
+  cpp: {
+    label: 'C++',
+    shortLabel: 'C++',
+    editorLanguage: 'cpp',
+    fileName: 'solution.cpp',
+    fileExtension: '.cpp',
+    diagnosticsLabel: 'C++ 编译诊断',
+    runtime: 'cpu',
+  },
+  python: {
+    label: 'Python',
+    shortLabel: 'Python',
+    editorLanguage: 'python',
+    fileName: 'solution.py',
+    fileExtension: '.py',
+    diagnosticsLabel: 'Python 诊断',
+    runtime: 'cpu',
+  },
 } as const satisfies Record<KernelLanguage, LanguageMetadata>
 
 export function isKernelLanguage(value: unknown): value is KernelLanguage {
@@ -52,4 +72,12 @@ export function isKernelLanguage(value: unknown): value is KernelLanguage {
 
 export function languageLabel(language: KernelLanguage): string {
   return languageMetadata[language].label
+}
+
+export function isCpuLanguage(language: KernelLanguage): boolean {
+  return languageMetadata[language].runtime === 'cpu'
+}
+
+export function isKernelProblemLanguage(language: KernelLanguage): boolean {
+  return language === 'cuda_cpp' || language === 'triton_python'
 }

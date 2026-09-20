@@ -46,6 +46,27 @@ class DraftRecord(Base):
     )
 
 
+class ExecutionSettingsRecord(Base):
+    __tablename__ = "execution_settings"
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True, default="default")
+    target: Mapped[str] = mapped_column(String(16), nullable=False, default="local")
+    colab_acknowledged: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ExecutionProbeRecord(Base):
+    __tablename__ = "execution_probes"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_string)
+    target: Mapped[str] = mapped_column(String(16), nullable=False)
+    language: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
+    result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class EnvironmentSnapshotRecord(Base):
     __tablename__ = "environment_snapshots"
 

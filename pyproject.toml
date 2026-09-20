@@ -20,6 +20,7 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 markers = [
   "gpu: requires a real NVIDIA GPU through Docker",
+  "colab_gpu: requires explicit opt-in and an existing Colab SSH ControlMaster",
   "e2e: requires a running full stack and browser",
 ]
 

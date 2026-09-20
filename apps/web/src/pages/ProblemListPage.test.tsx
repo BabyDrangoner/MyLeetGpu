@@ -56,4 +56,24 @@ describe('ProblemListPage', () => {
     render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><ProblemListPage /></MemoryRouter>)
     expect(await screen.findByText('还没有题目')).toBeInTheDocument()
   })
+
+  it('keeps CPU algorithm questions out of the GPU kernel and PyTorch categories', async () => {
+    listMock.mockResolvedValue([
+      { slug: 'softmax', title: 'GPU Softmax', difficulty: 'medium', revision: '1', summary: '', languages: ['cuda_cpp', 'triton_python'] },
+      { slug: 'online-softmax', title: 'Online Softmax', difficulty: 'medium', revision: '1', summary: '', languages: ['cpp', 'python'] },
+      { slug: 'mha', title: 'Attention', difficulty: 'medium', revision: '1', summary: '', languages: ['torch_python'] },
+    ])
+    const user = userEvent.setup()
+    render(<MemoryRouter><ProblemListPage /></MemoryRouter>)
+    await screen.findByText('Online Softmax')
+    await user.click(screen.getByRole('button', { name: /CPU 算法题/ }))
+    expect(screen.getAllByRole('link')).toHaveLength(1)
+    expect(screen.getByRole('link', { name: /Online Softmax/ })).toHaveAttribute('href', '/problems/online-softmax')
+    expect(screen.getByText('C++', { exact: true })).toBeInTheDocument()
+    expect(screen.getByText('Python', { exact: true })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /算子题/ }))
+    expect(screen.getAllByRole('link')).toHaveLength(1)
+    expect(screen.getByText('GPU Softmax')).toBeInTheDocument()
+    expect(screen.queryByText('Online Softmax')).not.toBeInTheDocument()
+  })
 })

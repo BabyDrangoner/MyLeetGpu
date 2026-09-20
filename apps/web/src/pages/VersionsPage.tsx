@@ -12,7 +12,7 @@ import { useAsync } from '../hooks/useAsync'
 import { useJob } from '../hooks/useJob'
 import { comparisonMetric, latestBenchmarkRun, localComparability } from '../lib/benchmark'
 import { formatDate, formatMetric, formatPercent } from '../lib/format'
-import { implementationLanguages, isKernelLanguage, languageLabel } from '../lib/languages'
+import { implementationLanguages, isCpuLanguage, isKernelLanguage, languageLabel } from '../lib/languages'
 
 const MAX_SELECTED_VERSIONS = 8
 const EMPTY_VERSIONS: SavedVersion[] = []
@@ -26,6 +26,8 @@ function shortHash(hash?: string) {
 }
 
 function toolchainLabel(language: KernelLanguage, environment?: EnvironmentSnapshot): string {
+  if (language === 'cpp') return `C++17 / ${environment?.compiler_version ?? '—'}`
+  if (language === 'python') return `Python ${environment?.python_version ?? '—'} / 标准库`
   if (language === 'cuda_cpp') {
     return `CUDA ${environment?.cuda_runtime_version ?? environment?.cuda_version ?? '—'} / NVCC ${environment?.nvcc_version ?? '—'}`
   }
@@ -356,7 +358,20 @@ export function VersionsPage() {
                     const flags = run?.compiler_flags ?? run?.compile_flags ?? version.compile_flags
                     const flagsText = Array.isArray(flags) ? flags.join(' ') : flags
                     const imageDigest = env?.container_digest ?? env?.image_digest
-                    return <div key={version.id}><strong>{version.name}</strong><dl><div><dt>实现语言</dt><dd>{languageLabel(version.language)}</dd></div><div><dt>题目修订</dt><dd>{version.problem_revision}</dd></div><div><dt>Suite</dt><dd><code>{shortHash(run?.suite_hash)}</code></dd></div><div><dt>协议版本</dt><dd>{run?.protocol_version ?? 'unavailable'}</dd></div><div><dt>执行配置</dt><dd title={flagsText}><code>{flagsText || 'unavailable'}</code></dd></div><div><dt>GPU</dt><dd>{env?.gpu_name ?? env?.gpu ?? 'unavailable'}</dd></div><div><dt>驱动</dt><dd>{env?.driver_version ?? 'unavailable'}</dd></div><div><dt>工具链</dt><dd>{toolchainLabel(version.language, env)}</dd></div><div><dt>镜像摘要</dt><dd title={imageDigest}><code>{shortHash(imageDigest)}</code></dd></div><div><dt>环境指纹</dt><dd><code>{shortHash(run?.environment_fingerprint ?? env?.fingerprint)}</code></dd></div><div><dt>预热 / 样本</dt><dd>{run?.warmup ?? '—'} / {run?.iterations ?? '—'}</dd></div></dl></div>
+                    const cpu = isCpuLanguage(version.language)
+                    return <div key={version.id}><strong>{version.name}</strong><dl>
+                      <div><dt>实现语言</dt><dd>{languageLabel(version.language)}</dd></div>
+                      <div><dt>题目修订</dt><dd>{version.problem_revision}</dd></div>
+                      <div><dt>Suite</dt><dd><code>{shortHash(run?.suite_hash)}</code></dd></div>
+                      <div><dt>协议版本</dt><dd>{run?.protocol_version ?? 'unavailable'}</dd></div>
+                      <div><dt>执行配置</dt><dd title={flagsText}><code>{flagsText || 'unavailable'}</code></dd></div>
+                      <div><dt>{cpu ? 'CPU' : 'GPU'}</dt><dd>{cpu ? env?.cpu_name ?? 'unavailable' : env?.gpu_name ?? env?.gpu ?? 'unavailable'}</dd></div>
+                      <div><dt>{cpu ? '操作系统' : '驱动'}</dt><dd>{cpu ? env?.platform ?? 'unavailable' : env?.driver_version ?? 'unavailable'}</dd></div>
+                      <div><dt>工具链</dt><dd>{toolchainLabel(version.language, env)}</dd></div>
+                      {!cpu && <div><dt>镜像摘要</dt><dd title={imageDigest}><code>{shortHash(imageDigest)}</code></dd></div>}
+                      <div><dt>环境指纹</dt><dd><code>{shortHash(run?.environment_fingerprint ?? env?.fingerprint)}</code></dd></div>
+                      <div><dt>预热 / 样本</dt><dd>{run?.warmup ?? '—'} / {run?.iterations ?? '—'}</dd></div>
+                    </dl></div>
                   })}
                 </div>
               </section>
@@ -406,7 +421,7 @@ export function VersionsPage() {
         footer={<><button className="button ghost" type="button" onClick={() => setRetestOpen(false)}>取消</button><button className="button accent" type="button" onClick={() => void startRetest()}><Play size={15} />开始串行重测</button></>}
       >
         <div className="retest-list">{selectedVersions.map((version) => <div key={version.id}><Check size={14} />{version.name} <span className="language-badge">{languageLabel(version.language)}</span></div>)}</div>
-        <p className="modal-help">GPU Job 会严格串行。只有新测量成功时才追加 BenchmarkRun；不会创建新的 Version。</p>
+        <p className="modal-help">测量任务会严格串行。只有新测量成功时才追加 BenchmarkRun；不会创建新的 Version。</p>
       </Modal>
     </div>
   )

@@ -1,6 +1,6 @@
 import { Archive, Braces, ChevronDown, ChevronLeft, ChevronRight, Clock3, FileCheck2, PanelsTopLeft, PanelLeftClose, PanelLeftOpen, Play, RotateCcw, Save, Settings2 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useParams, useSearchParams } from 'react-router-dom'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Link, useParams } from 'react-router-dom'
 import { api } from '../api/client'
 import { CodeEditor } from '../components/CodeEditor'
 import { JobPanel } from '../components/JobPanel'
@@ -14,21 +14,20 @@ import type { Job, JobAction, KernelLanguage, SavedVersion } from '../domain/typ
 import { useAsync } from '../hooks/useAsync'
 import { useJob } from '../hooks/useJob'
 import { useWorkspaceLayout } from '../hooks/useWorkspaceLayout'
-import { readLocalDraft, saveLocalDraft } from '../lib/drafts'
+import { executionTargetLabel, useExecutionSettings } from '../hooks/useExecutionSettings'
+import { useWorkspaceSession } from '../hooks/useWorkspaceSession'
 import { difficultyLabel, formatDate, readableStatus } from '../lib/format'
-import { implementationLanguages, isKernelLanguage, languageLabel } from '../lib/languages'
+import { isCpuLanguage, languageLabel } from '../lib/languages'
 
 const difficultyClass = (difficulty: string) => difficulty.includes('困难') || difficulty === 'hard' ? 'hard' : difficulty.includes('中等') || difficulty === 'medium' ? 'medium' : 'easy'
 
 export function WorkspacePage() {
   const { slug = '' } = useParams()
-  const [searchParams, setSearchParams] = useSearchParams()
   const toast = useToast()
   const problem = useAsync(() => api.problems.get(slug), [slug])
-  const [source, setSource] = useState('')
-  const [loadedDraftKey, setLoadedDraftKey] = useState<string>()
-  const [draftSavedAt, setDraftSavedAt] = useState<string>()
-  const [draftRemote, setDraftRemote] = useState<'idle' | 'saving' | 'saved' | 'local-only'>('idle')
+  const session = useWorkspaceSession(slug, problem.data)
+  const { language, implementation, supportedLanguages, draft } = session
+  const { source, ready: draftReady, savedAt: draftSavedAt, status: draftRemote, updateSource, getSource } = draft
   const [statementTab, setStatementTab] = useState<'statement' | 'protocol'>('statement')
   const [focusMode, setFocusMode] = useState(false)
   const [outputExpanded, setOutputExpanded] = useState(true)
@@ -36,24 +35,9 @@ export function WorkspacePage() {
   const [saveOpen, setSaveOpen] = useState(false)
   const [saveSnapshot, setSaveSnapshot] = useState<{ language: KernelLanguage; source: string }>()
   const [versions, setVersions] = useState<SavedVersion[]>([])
-  const autosaveSequence = useRef(0)
-  const draftLoadSequence = useRef(0)
-  const sourceRevision = useRef(0)
-  const sourceRef = useRef(source)
   const submissionLock = useRef(false)
   const layout = useWorkspaceLayout()
-
-  const supportedLanguages = useMemo(() => {
-    const implementations = problem.data?.implementations
-    return implementationLanguages.filter((language) => implementations?.[language])
-  }, [problem.data])
-  const requestedLanguage = searchParams.get('language')
-  const language = isKernelLanguage(requestedLanguage) && supportedLanguages.includes(requestedLanguage)
-    ? requestedLanguage
-    : problem.data?.default_language ?? supportedLanguages[0] ?? 'cuda_cpp'
-  const implementation = problem.data?.implementations[language]
-  const draftKey = `${slug}:${language}`
-  const draftReady = loadedDraftKey === draftKey
+  const execution = useExecutionSettings()
 
   const refreshVersions = useCallback(async () => {
     try {
@@ -81,93 +65,18 @@ export function WorkspacePage() {
   }, [jobs.error])
 
   useEffect(() => {
-    if (!problem.data || searchParams.get('language') === language) return
-    const next = new URLSearchParams(searchParams)
-    next.set('language', language)
-    setSearchParams(next, { replace: true })
-  }, [language, problem.data, searchParams, setSearchParams])
-
-  useEffect(() => {
-    if (!problem.data || !implementation) return
-    const loadSequence = ++draftLoadSequence.current
-    ++autosaveSequence.current
     let cancelled = false
-    sourceRevision.current = 0
-    setLoadedDraftKey(undefined)
-    setDraftRemote('idle')
-    const local = readLocalDraft(slug, language)
-    sourceRef.current = local?.source ?? implementation.starter_code
-    setSource(sourceRef.current)
-    setDraftSavedAt(local?.updatedAt)
-    void api.drafts.get(slug, language).then((remote) => {
-      if (cancelled || loadSequence !== draftLoadSequence.current) return
-      const localTime = local ? new Date(local.updatedAt).valueOf() : 0
-      const remoteTime = remote.updated_at ? new Date(remote.updated_at).valueOf() : 0
-      if (sourceRevision.current === 0 && remote.source && remoteTime > localTime) {
-        sourceRef.current = remote.source
-        setSource(remote.source)
-        saveLocalDraft(slug, language, remote.source)
-        setDraftSavedAt(remote.updated_at)
-      }
-      setDraftRemote('saved')
-    }).catch((_error) => {
-      if (cancelled || loadSequence !== draftLoadSequence.current) return
-      setDraftRemote('local-only')
-    }).finally(() => {
-      if (!cancelled && loadSequence === draftLoadSequence.current) setLoadedDraftKey(draftKey)
-    })
-    void refreshVersions()
-    return () => {
-      cancelled = true
-      ++autosaveSequence.current
-    }
-  }, [draftKey, implementation, language, problem.data?.slug, refreshVersions, slug])
-
-  useEffect(() => {
-    if (!draftReady || !problem.data) return
-    const sequence = ++autosaveSequence.current
-    const localTimer = window.setTimeout(() => {
-      if (sequence !== autosaveSequence.current) return
-      const saved = saveLocalDraft(slug, language, source)
-      setDraftSavedAt(saved.updatedAt)
-      setDraftRemote('saving')
-    }, 350)
-    const remoteTimer = window.setTimeout(() => {
-      if (sequence !== autosaveSequence.current) return
-      void api.drafts.save(slug, language, source).then((draft) => {
-        if (sequence !== autosaveSequence.current) return
-        setDraftSavedAt(draft.updated_at)
-        setDraftRemote('saved')
-      }).catch(() => {
-        if (sequence === autosaveSequence.current) setDraftRemote('local-only')
-      })
-    }, 1_100)
-    return () => {
-      window.clearTimeout(localTimer)
-      window.clearTimeout(remoteTimer)
-    }
-  }, [draftKey, draftReady, language, problem.data, slug, source])
+    setVersions([])
+    void api.versions.list(slug).then((items) => {
+      if (!cancelled) setVersions(items)
+    }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [slug])
 
   const selectLanguage = (nextLanguage: KernelLanguage) => {
-    if (jobs.busy || saveOpen || nextLanguage === language) return
-    if (draftReady) {
-      const saved = saveLocalDraft(slug, language, source)
-      setDraftSavedAt(saved.updatedAt)
-      void api.drafts.save(slug, language, source).catch(() => undefined)
-    }
-    ++autosaveSequence.current
-    setLoadedDraftKey(undefined)
-    jobs.clear()
-    const next = new URLSearchParams(searchParams)
-    next.set('language', nextLanguage)
-    setSearchParams(next)
+    if (jobs.busy || saveOpen || resetOpen) return
+    if (session.selectLanguage(nextLanguage)) jobs.clear()
   }
-
-  const updateSource = useCallback((next: string) => {
-    sourceRevision.current += 1
-    sourceRef.current = next
-    setSource(next)
-  }, [])
 
   const startAction = useCallback(async (action: Exclude<JobAction, 'rebenchmark'>, payload?: SaveVersionPayload) => {
     if (!draftReady || problem.loading || problem.error || resetOpen || jobs.busy || submissionLock.current || (saveOpen && action !== 'save_version')) return
@@ -178,7 +87,7 @@ export function WorkspacePage() {
         problem_id: slug,
         language: payload?.language ?? language,
         action,
-        source: payload?.source ?? sourceRef.current,
+        source: payload?.source ?? getSource(),
         version_name: payload?.name,
         notes: payload?.notes,
         allow_duplicate: payload?.allowDuplicate,
@@ -189,7 +98,7 @@ export function WorkspacePage() {
     } finally {
       submissionLock.current = false
     }
-  }, [draftReady, jobs.busy, jobs.start, language, problem.error, problem.loading, resetOpen, saveOpen, slug, toast])
+  }, [draftReady, getSource, jobs.busy, jobs.start, language, problem.error, problem.loading, resetOpen, saveOpen, slug, toast])
 
   useEffect(() => {
     const runSample = (event: KeyboardEvent) => {
@@ -213,6 +122,10 @@ export function WorkspacePage() {
     return <div className="page"><StatusView kind="error" description="题目没有可用的语言实现。" /></div>
   }
   const languageVersionCount = versions.filter((version) => version.language === language).length
+  const cpu = isCpuLanguage(language)
+  const outputStatus = jobs.submitting ? '正在提交' : jobs.error ? '请求失败' : jobs.job
+    ? [jobs.job.execution_target ? executionTargetLabel(jobs.job.execution_target) : '', outputExpanded ? '' : readableStatus(jobs.job.status)].filter(Boolean).join(' · ')
+    : '尚未运行'
 
   return (
     <div className="workspace-page">
@@ -223,6 +136,7 @@ export function WorkspacePage() {
             <h1>{detail.title}</h1>
             <span className={`difficulty ${difficultyClass(detail.difficulty)}`}>{difficultyLabel(detail.difficulty)}</span>
             <span className="revision-badge">rev {detail.revision}</span>
+            <Link className="execution-target-badge" to={cpu ? `/environment?language=${language}` : '/environment'} title={cpu ? '在 Worker 所在机器的 CPU 上原生执行，不依赖 GPU 或 Colab' : '仅影响后续提交的任务；草稿保持不变'}>执行：{executionTargetLabel(cpu ? 'cpu' : execution?.settings?.target)}</Link>
           </div>
         </div>
         <div className="workspace-controls">
@@ -248,6 +162,7 @@ export function WorkspacePage() {
             {statementTab === 'statement' ? (
               <>
                 <MarkdownText source={detail.statement_markdown} />
+                {cpu && <p className="inline-notice warning">CPU 代码在 Worker 所在机器原生运行，不使用安全沙箱；仅提交可信代码，不需要 GPU 或 Colab。</p>}
                 {activeImplementation.instructions_markdown && <MarkdownText source={activeImplementation.instructions_markdown} />}
                 {!!detail.constraints?.length && (
                   <section className="constraint-block">
@@ -261,7 +176,7 @@ export function WorkspacePage() {
               <div className="protocol-content">
                 <div className="protocol-callout">
                   <Clock3 size={20} />
-                  <div><strong>平台 harness 计时</strong><p>排除编译或预检查、容器启动、初始化、分配和拷贝；先预热，再用设备事件采样。</p></div>
+                  <div><strong>平台 harness 计时</strong><p>{cpu ? '排除编译或语法检查、进程启动与测试数据生成；先预热，再用 CPU 单调时钟采样函数执行时间。' : '排除编译或预检查、容器启动、初始化、分配和拷贝；先预热，再用设备事件采样。'}</p></div>
                 </div>
                 <dl>
                   <div><dt>输入规模</dt><dd>{detail.benchmark?.input_sizes?.join(' / ') ?? '由题目配置'}</dd></div>
@@ -270,7 +185,7 @@ export function WorkspacePage() {
                   <div><dt>核心指标</dt><dd>median；同时记录 p95、min 与波动</dd></div>
                   <div><dt>可比条件</dt><dd>实现语言、题目修订、suite、规模、执行配置及环境指纹一致</dd></div>
                 </dl>
-                <p className="muted-copy">温度、功耗策略与后台 GPU 工作会造成波动。本机结果不代表跨机器的绝对排名。</p>
+                <p className="muted-copy">{cpu ? 'CPU 频率、系统调度与后台进程会造成波动。' : '温度、功耗策略与后台 GPU 工作会造成波动。'}本机结果不代表跨机器的绝对排名。</p>
               </div>
             )}
           </div>
@@ -299,7 +214,7 @@ export function WorkspacePage() {
             <div className="action-bar">
               <div className="action-group">
                 <button className="button primary" disabled={jobs.busy || !draftReady} type="button" aria-keyshortcuts="Control+Enter Meta+Enter" title="运行样例（Ctrl / ⌘ + Enter）" onClick={() => void startAction('run')}><Play size={16} />运行样例<kbd className="shortcut-hint" aria-hidden="true">Ctrl/⌘ ↵</kbd></button>
-                <button className="button secondary" disabled={jobs.busy || !draftReady} type="button" onClick={() => void startAction('compile')}><Settings2 size={16} />{language === 'torch_python' ? '代码检查' : '编译'}</button>
+                <button className="button secondary" disabled={jobs.busy || !draftReady} type="button" onClick={() => void startAction('compile')}><Settings2 size={16} />{language === 'torch_python' || language === 'python' ? '代码检查' : '编译'}</button>
                 <button className="button secondary" disabled={jobs.busy || !draftReady} type="button" onClick={() => void startAction('validate')}><FileCheck2 size={16} />完整验证</button>
               </div>
               <button
@@ -316,7 +231,7 @@ export function WorkspacePage() {
               <button className="output-toggle" type="button" aria-label={outputExpanded ? '收起任务与输出' : '展开任务与输出'} aria-expanded={outputExpanded} aria-controls="workspace-output" onClick={() => setOutputExpanded((expanded) => !expanded)}>
                 {outputExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}<strong>任务与输出</strong>
               </button>
-              <span className="output-status" role="status">{jobs.submitting ? '正在提交' : jobs.error ? '请求失败' : jobs.job ? (outputExpanded ? '' : readableStatus(jobs.job.status)) : '尚未运行'}</span>
+              <span className="output-status" role="status">{outputStatus}</span>
             </header>
             <div className="output-scroll" id="workspace-output" hidden={!outputExpanded}><JobPanel job={jobs.job} requestError={jobs.error} onClear={jobs.clear} /></div>
           </section>

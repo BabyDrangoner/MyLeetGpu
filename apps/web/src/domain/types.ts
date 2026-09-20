@@ -1,12 +1,21 @@
 export type Difficulty = '入门' | '简单' | '中等' | '困难' | string
 
-export type KernelLanguage = 'cuda_cpp' | 'triton_python' | 'torch_python'
+export type KernelLanguage = 'cuda_cpp' | 'triton_python' | 'torch_python' | 'cpp' | 'python'
 export type EditorLanguage = 'cpp' | 'python'
+export type GpuExecutionTarget = 'local' | 'colab'
+export type ExecutionTarget = GpuExecutionTarget | 'cpu'
+
+export interface ExecutionSettings {
+  target: GpuExecutionTarget
+  colab_acknowledged: boolean
+  colab: { ssh_host: string; remote_root: string; isolation: 'trusted-native' }
+  updated_at: string | null
+}
 
 export interface ProblemImplementation {
   language: KernelLanguage
   display_name: string
-  file_extension: '.cu' | '.py'
+  file_extension: '.cu' | '.cpp' | '.py'
   editor_language: EditorLanguage
   starter_code: string
   signature?: string
@@ -100,6 +109,7 @@ export interface JobError {
 
 export interface Job {
   id: string
+  execution_target?: ExecutionTarget
   problem_id?: string
   language: KernelLanguage
   status: JobStatus
@@ -129,11 +139,16 @@ export interface BenchmarkMetric {
 
 export interface EnvironmentSnapshot {
   id?: string
+  execution_target?: ExecutionTarget
   backend?: KernelLanguage
   healthy?: boolean
   status?: string
   gpu_name?: string
   gpu?: string
+  cpu_name?: string
+  platform?: string
+  architecture?: string
+  compiler_version?: string
   compute_capability?: string
   driver_version?: string
   cuda_runtime_version?: string

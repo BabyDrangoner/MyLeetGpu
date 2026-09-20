@@ -4,7 +4,7 @@
 
 本文描述 MyLeetGpu 当前版本的产品语义、模块边界、数据模型、任务协议、CUDA C++ / Triton / PyTorch 执行隔离和运维策略。实现、测试和 UI 应共同遵守本文中的不变量；若接口细节发生变化，应同时更新 OpenAPI、本文和用户指南。
 
-MyLeetGpu 是一个在 Windows + WSL2 + NVIDIA GPU 上运行的本地 GPU 编程练习环境，当前把 `cuda_cpp`、`triton_python` 和 `torch_python` 作为三种一等实现语言。前两种面向自定义 Kernel，第三种面向由基础 PyTorch Tensor 运算组合出的模型算法。它面向单机、单用户、可信操作者，但仍把待执行的 CUDA C++ / Python 源码视为不可信输入。
+MyLeetGpu 是一个面向可信单用户的 GPU 编程练习环境，支持本地 NVIDIA GPU（Docker）以及操作者已连接的 Colab GPU（SSH）。使用 Colab 时，本机无需 NVIDIA GPU。项目把 `cuda_cpp`、`triton_python` 和 `torch_python` 作为三种一等实现语言；前两种面向自定义 Kernel，第三种面向基础 PyTorch Tensor 运算组合出的模型算法。本地模式把提交视为不可信输入并做容器纵深防护；Colab 原生模式仅允许可信代码，不声称具有同等隔离。
 
 > 安全边界：默认宿主机唯一发布的端口是 `127.0.0.1:3000`。显式启用 LAN overlay 时，Nginx 还会在检测出的具体局域网 IPv4 上发布经过 Basic Auth 保护的 3000，并用 Windows + WSL Hyper-V 防火墙限制到 `LocalSubnet`。API 8000 始终不向宿主发布。LAN 模式只方便同一受信任网络中的单一操作者，不提供多租户隔离或传输加密；严禁公网、端口转发和不可信远程提交。
 
@@ -24,7 +24,7 @@ MyLeetGpu 是一个在 Windows + WSL2 + NVIDIA GPU 上运行的本地 GPU 编程
 
 ### 2.2 非目标
 
-当前版本不实现：Debug、断点、单步、变量监视、cuda-gdb、Nsight、Profiler、PTX/汇编查看；应用账号、细粒度权限、多用户隔离、排行榜、讨论、公开解答和支付；Mojo、JAX、CuTe 及任意 Python 包安装；面向用户的提交/判题 CLI、云 GPU、远程部署、集群调度、AI Chat 和在线题目管理后台。LAN overlay 的 Nginx Basic Auth 只是单一共享入口凭据，不是账号系统。仓库中的 `myleetgpu.cli` 只承载 `clean-jobs`、`recover-runner` 等本机维护命令，不是另一套产品入口。
+当前版本不实现：Debug、断点、单步、变量监视、cuda-gdb、Nsight、Profiler、PTX/汇编查看；应用账号、细粒度权限、多用户隔离、排行榜、讨论、公开解答和支付；Mojo、JAX、CuTe 及任意 Python 包安装；面向用户的提交/判题 CLI、云实例自动创建与计费、集群调度、AI Chat 和在线题目管理后台。Colab 支持仅复用已授权建立的 SSH 会话，不负责其生命周期。LAN overlay 的 Nginx Basic Auth 只是单一共享入口凭据，不是账号系统。仓库中的 `myleetgpu.cli` 只承载 `clean-jobs`、`recover-runner` 等本机维护命令，不是另一套产品入口。
 
 编译和普通诊断属于正常判题能力，不属于 Debug。平台不会复制 LeetGPU 的品牌、题面、starter、测试或源码；所有内置题目和测试均为本项目原创内容。
 
@@ -34,7 +34,7 @@ MyLeetGpu 是一个在 Windows + WSL2 + NVIDIA GPU 上运行的本地 GPU 编程
 
 ```mermaid
 flowchart LR
-    U["Windows 浏览器<br/>http://localhost:3000"]
+    U["本机浏览器<br/>http://localhost:3000"]
     W["Nginx 静态站点<br/>React + TypeScript + Vite + Monaco"]
     A["FastAPI<br/>同源 /api"]
     AP["应用服务<br/>用例与状态机"]
@@ -44,7 +44,10 @@ flowchart LR
     P["声明式题目注册表<br/>problems/*"]
     K["独立 SQLite Job Worker<br/>租约 + 单 GPU 串行锁"]
     S["权限受限的临时 spool"]
-    R["Docker Runner Adapter<br/>argv allowlist"]
+    J["JobExecutor<br/>判题用例与结果规则"]
+    R["Runner Protocol / ExecutionRouter<br/>任务执行位置快照"]
+    L["DockerRunner<br/>受限一次性容器"]
+    CR["ColabRunner<br/>已连接 SSH / 原生可信进程"]
     C["一次性预检查/编译容器<br/>无 GPU"]
     G["一次性执行容器<br/>仅此阶段挂载 GPU"]
 
@@ -58,21 +61,27 @@ flowchart LR
     K --> DB
     K --> AP
     K --> S
-    K --> R
-    R --> C
-    R --> G
+    K --> J
+    J --> R
+    J --> DB
+    R --> L
+    R --> CR
+    L --> C
+    L --> G
     P --> S
 ```
 
 这是一个模块化单体：Web/API/Worker 是独立进程，但共享同一领域模型和 SQLite 数据库。不引入 Redis、Celery 或 Kubernetes。默认浏览器只访问 `127.0.0.1:3000`；可选 LAN overlay 增加具体 LAN IPv4 的同端口映射和 Nginx Basic Auth。Nginx 将同源 `/api` 请求转发到 Compose 网络内的 `api:8000`。API 的默认直接运行地址是 `127.0.0.1:8000`；Compose 内部使用 `0.0.0.0:8000` 只是容器间可达要求，`8000` 没有 host `ports` 映射。
 
+Colab 开发模式在配置了 SSH/Colab CLI 的本机账户下原生启动 API、Worker 和 Vite；默认 Compose 不读取宿主 SSH 凭据。具体命令见用户指南 §4.5。代码导航、重构决策和扩展步骤见 [架构与维护指南](architecture.md)。
+
 ### 3.2 运行时约束
 
 - 基础 Compose 的主机端口映射必须显式写成 `127.0.0.1:3000:...`。LAN overlay 必须绑定自动检测或显式给定的单一非回环 IPv4，拒绝 `0.0.0.0`，同时挂载认证配置；不能依赖 Docker 默认绑定。
 - `make start` 先运行一次性 `migrate` 服务执行 `alembic upgrade head`；只有它成功退出，API 与 Worker 才启动。迁移失败不得用空库覆盖旧数据。
-- `/api/health` 仅表示 API 进程存活；`/api/ready` 检查数据库、非空题目注册表、最近一次健康的 CUDA Runner 环境快照、`gpu:0` Worker 活跃租约及共享 GPU 熔断文件。任一条件失败均返回 503。Triton 与纯 PyTorch 工具链分别按需探测；某一 Python backend 缺失时只阻止对应 Job，不应把其他可用路径伪装为不可用。
+- `/api/health` 仅表示 API 进程存活；`/api/ready` 检查数据库、非空题目注册表、已保存执行位置最近一次健康的 CUDA Runner 环境快照、`gpu:0` Worker 活跃租约及该位置的熔断状态。任一条件失败均返回 503。Triton 与纯 PyTorch 工具链分别按需探测；某一 Python backend 缺失时只阻止对应 Job，不应把其他可用路径伪装为不可用。
 - 编译容器和 GPU 执行容器彼此独立，均为一次性容器。
-- 单张 GPU 任一时刻最多执行一个运行、验证或 benchmark Job，其余 Job 留在 SQLite 队列中。
+- 所有执行位置共用单 Worker 租约，任一时刻最多执行一个运行、验证、benchmark 或连接探测；切换位置不会改变已提交 Job 的执行位置，也不会自动回退到其他设备。
 - 普通 Job 的源码只存在于权限受限的临时 spool；完成、取消、超时或崩溃恢复后均须清除。
 - CUDA C++ 固定使用 `nvidia/cuda:12.4.1-devel-ubuntu22.04`。Triton 与 PyTorch 固定共用官方 `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel@sha256:14611869895df612b7b07227d5925f30ec3cd6673bad58ce3d84ed107950e014`，镜像内实际工具链为 Python 3.11、PyTorch 2.5.1 + CUDA 12.4、Triton 3.1。Runner 拒绝 `latest` 和 Docker 隐式拉取，读取实际 RepoDigest，并按 backend 把 GPU、工具链和镜像信息写入独立环境快照。
 
@@ -86,15 +95,15 @@ flowchart LR
 | --- | --- | --- | --- |
 | `apps/web` | 中文 UI、Monaco、草稿交互、任务状态、版本比较和环境状态 | `/api` 契约 | 直接访问数据库或 Docker；用前端时间充当 benchmark |
 | `backend/myleetgpu/domain` | Job 状态、benchmark 统计/可比性，以及题目 manifest 与目录注册表 | 标准库、Pydantic、YAML 和受约束的题目文件读取 | FastAPI、SQLAlchemy、Docker 子进程 |
-| `backend/myleetgpu/application` | Job 提交与 spool 生命周期、重复版本校验、版本比较等 HTTP/Worker 共用用例 | 领域层与仓储 | 拼接 shell 命令；执行用户二进制；绕过版本保存不变量 |
+| `backend/myleetgpu/application` | Job 提交、JobExecutor 判题、纯结果规则、版本比较与探测排队 | 领域层、仓储、Runner Protocol / 结果类型 | 依赖 HTTP 或具体 Docker/Colab 实现；管理 SQL 会话；绕过版本保存不变量 |
 | `backend/myleetgpu/infrastructure` | SQLAlchemy 2 仓储、SQLite 队列、Alembic、时钟和文件 spool 实现 | 应用端口、领域层 | 把 ORM 实体泄漏到 UI；永久保留普通 Job 源码 |
-| `backend/myleetgpu/runner` | CUDA/Triton/PyTorch Docker Runner adapter、语言工具链探测、提交策略、资源限制、输出清理、超时和容器清理 | Runner 端口和受控配置 | 接收任意命令、编译参数、路径或 shell 字符串 |
-| `backend/myleetgpu/api` | FastAPI 路由、Pydantic 校验、错误映射、OpenAPI | 应用层 | 在请求线程直接运行 NVCC/Docker |
-| Worker | 原子领取 Job、维护租约，并编排编译、运行、验证、保存、重测、清理和熔断 | Domain、Application、Repository 与 Runner adapter | 并发使用同一 GPU；在日志中泄漏内部测试 |
+| `backend/myleetgpu/runner` | 显式执行端口、路由及平级的 Docker / Colab 适配器；共享语言策略和协议处理 | Runner 端口和受控配置 | Colab 继承 Docker；隐式属性转发；接收用户任意命令或连接配置 |
+| `backend/myleetgpu/api` | 组合入口、分资源 Router、可覆盖依赖、响应投影、错误映射和 OpenAPI | 应用层、仓储读写接口 | 在请求线程直接运行 NVCC/Docker/SSH；直接序列化整个 ORM 实体 |
+| Worker | 领取任务、续约、选择任务目标、调用 JobExecutor、记录终态和清理 | Application、Repository、Runner / TargetRunner 端口 | 重复实现判题规则；并发使用 GPU；泄漏内部测试 |
 | `alembic` / `migrate` | 管理 schema revision；Compose 启动前一次性执行 `upgrade head` | SQLAlchemy metadata、SQLite | 迁移失败后用空库覆盖持久数据 |
 | `problems` | 公共题面、分语言说明/starter/接口、可信 validator/benchmark harness 和测试声明 | 题目 schema v2 | 将题目特例写进 Judge 核心 |
 
-当前实现是清晰分区的模块化单体，而不是强制每一层都经抽象 port 的 Clean Architecture：API 调用 Application 和 Repository，Worker 直接协调 Domain、Repository 与 Runner adapter。关键边界是不变的——FastAPI 请求线程不运行 Docker，业务用例不构造 shell；Docker 命令只由 Runner adapter 根据固定模板生成，并以参数数组传给进程 API。
+当前实现采用模块化单体、用例服务和选择性的端口/适配器模式，不为每个实体添加一套重复 DTO 或通用 Repository 框架。API 显式投影持久化模型；应用服务仍可使用 Repository 及其返回的记录，但 SQL 和事务都收口在基础设施层。执行变化通过 Runner Protocol 隔离：DockerRunner 与 ColabRunner 是平级适配器，ExecutionRouter 显式委派所需操作，BaseRunner 仅共享传输无关的准备、解析和清理工具。Worker 只管理生命周期，JobExecutor 注入租约检查回调，纯结果规则可不启动 Worker、数据库或 GPU 独立测试。`tests/test_architecture.py` 持续约束这些依赖方向。
 
 ## 5. 题目协议
 
@@ -226,6 +235,9 @@ erDiagram
 | `GET /api/health` | 进程存活检查，不触发 GPU 操作 |
 | `GET /api/ready` | 检查数据库、题目、健康 CUDA 环境快照、Worker 活跃租约和共享 GPU 熔断文件；不就绪时返回 503 |
 | `GET /api/environment?language=...` | 指定语言最近一次 GPU/Runner 环境快照；默认 `cuda_cpp`，熔断状态以 `/api/ready` 为准 |
+| `GET /api/execution-settings` | 当前保存的执行位置、Colab 可信代码确认和只读连接说明 |
+| `PUT /api/execution-settings` | 保存后续任务的执行位置；Colab 必须显式确认可信代码边界 |
+| `POST /api/execution-settings/probe` | 排队测试候选执行位置及语言，不保存候选位置，不打断当前 GPU 任务 |
 | `GET /api/problems` | 题目摘要列表 |
 | `GET /api/problems/{slug}` | 题面、`default_language`、各语言 implementation 的签名/starter/说明、限制和 revision；不返回内部测试 |
 | `GET /api/drafts/{problem_id}?language=...` | 获取该题指定语言的草稿；省略语言时采用题目的 `default_language` |
@@ -286,7 +298,11 @@ Worker 启动时先获取 SQLite 中唯一的 `gpu:0` 资源租约，并每 5 �
 
 Worker 启动时只清理同时带 Runner 标记和当前 installation 标记的遗留一次性容器，不按 Compose 名称模糊匹配。租约续约或 owner 校验失败时，旧 Worker 立即停止轮询并删除带自身 owner 标记的在途容器。属于旧 Worker 且停在 `compiling/running/validating/benchmarking` 的 Job 被标记为 `system_error`，对应 spool 随后清理；尚未领取的 `queued` Job 保持排队。系统不会自动重放已开始的 Job，从而避免不确定的重复持久化。保存版本的 Version 与首次 BenchmarkRun 仍由单个数据库事务保护。
 
+Colab 的等价生命周期操作限于本安装的 UUID 任务目录与记录的进程组，不删除其他项目或停止运行时。Job 的 `execution_target` 在提交时快照化，旧记录缺省为 `local`；`colab_acknowledged` 同样记录到任务。连接探测和 Job 由同一 Worker 串行领取，本地与 Colab 的健康熔断及环境快照互不混用。
+
 ## 9. 四种操作的数据流
+
+本节的无 GPU 编译容器描述适用于本地模式；Colab 对同一源码和 harness 在已连接 VM 的专属任务目录中原生编译/预检与运行。判题动作、结果协议、原子保存和临时资源清理的业务语义一致，执行隔离和工具链来源不同。
 
 ### 9.1 通用入口
 
@@ -418,15 +434,17 @@ UI 首先按语言分组，正常比较请求携带当前语言，API 会拒绝�
 
 ### 11.1 假设与保护目标
 
-CUDA 提交可以是任意能被 NVCC 接受的 CUDA/C++；Triton 提交必须通过版本化 AST 白名单，只能包含精确 import、受限字面量常量、`@triton.jit` 函数和直线式 `solve` launcher；PyTorch 提交必须通过另一套版本化 AST 白名单，只能包含精确 `import torch`、受限字面量常量和单个 `solve`。用户代码仍可能造成资源耗尽、越界访问或 GPU/运行时异常。容器和 Runner 需要保护仓库、数据库、Docker daemon、主机普通文件和服务可用性，并避免内部测试经产品输出泄漏。
+CUDA 提交可以是任意能被 NVCC 接受的 CUDA/C++；Triton 提交必须通过版本化 AST 白名单，只能包含精确 import、受限字面量常量、`@triton.jit` 函数和直线式 `solve` launcher；PyTorch 提交必须通过另一套版本化 AST 白名单，遵守 §5.1 的函数或普通 class 合约，当前 MHA/GQA 使用注入权重和受限 `forward` 的 class。用户代码仍可能造成资源耗尽、越界访问或 GPU/运行时异常。容器和 Runner 需要保护仓库、数据库、Docker daemon、主机普通文件和服务可用性，并避免内部测试经产品输出泄漏。
 
 PyTorch 策略还必须保证 benchmark 所依赖的无持久状态不变量：模块常量只能是不可变标量或递归不可变 tuple，`solve` 及每层条件分支都重复执行语句白名单，禁止 helper、循环、嵌套 import、增量/原地赋值和全局状态修改。这样同一输入在固定确定性环境中的各次调用不能根据隐藏调用计数改变算法；benchmark 才可以在预热前、预热后和计时后进行代表性正确性复查，而不是把用户可控状态当成可信前提。
 
 本地操作者本身被视为可信：他可以访问工作站、仓库和 Docker。项目不尝试防御拥有 Windows/WSL/Docker 管理权限的用户。
 
-Worker 是受信控制平面组件。为了创建一次性容器，它可能需要访问 Docker socket；这等价于很高的宿主权限，因此 socket 只能挂给 Worker，不能挂给 API、Web 或用户代码容器。Worker 进程本身绝不加载用户动态库或直接执行用户二进制，所有不可信编译/运行只能发生在受限容器中。
+Worker 是受信控制平面组件。为了创建一次性容器，它可能需要访问 Docker socket；这等价于很高的宿主权限，因此 socket 只能挂给 Worker，不能挂给 API、Web 或用户代码容器。Worker 进程本身绝不加载用户动态库或直接执行用户二进制。本地模式的编译/运行在受限容器中发生；Colab 模式仅将可信提交和必要平台文件传到已连接远端，不上传本机工作区或凭据，不保证隔离远端文件系统、网络或其他资源。
 
 ### 11.2 容器策略
+
+以下容器策略仅适用于 `local`。Colab 使用限时、限输出的原生子进程与任务级清理，不能套用 Docker 安全承诺；禁止在含敏感凭据或私人 Drive 的会话中运行不可信代码。
 
 编译和执行容器均必须满足：
 

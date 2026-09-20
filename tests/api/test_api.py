@@ -47,10 +47,10 @@ def test_readiness_distinguishes_database_from_unprobed_runner(api) -> None:
     assert unavailable.json() == {
         "status": "not_ready",
         "database": True,
-        "problems": 10,
+        "problems": 11,
         "runner": "unavailable",
         "worker_active": False,
-        "runner_error": "worker has not probed the GPU yet",
+        "runner_error": "worker has not probed this runtime yet",
     }
 
     app.state.repository.save_environment(make_probe("ready-environment"))
@@ -68,13 +68,14 @@ def test_problem_list_and_detail_expose_all_public_manifests_only(api) -> None:
     detail = client.get("/api/problems/reduction")
 
     assert listing.status_code == 200
-    assert listing.json()["total"] == 10
+    assert listing.json()["total"] == 11
     listed_by_slug = {item["slug"]: item for item in listing.json()["items"]}
     assert set(listed_by_slug) == {
         "grouped-query-attention",
         "matrix-multiplication",
         "max-reduction",
         "multi-head-attention",
+        "online-softmax",
         "softmax",
         "top-k",
         "top-p",

@@ -3,11 +3,37 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from myleetgpu.domain.jobs import JobAction
 
-KernelLanguage = Literal["cuda_cpp", "triton_python", "torch_python"]
+KernelLanguage = Literal["cuda_cpp", "triton_python", "torch_python", "cpp", "python"]
+GpuExecutionTarget = Literal["local", "colab"]
+ExecutionTarget = Literal["local", "colab", "cpu"]
+
+
+class ExecutionSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target: GpuExecutionTarget
+    colab_acknowledged: bool = False
+
+    @model_validator(mode="after")
+    def require_acknowledgement(self) -> ExecutionSettingsUpdate:
+        if self.target == "colab" and not self.colab_acknowledged:
+            raise ValueError("请确认 Colab 仅执行可信代码，且不具备 Docker 等效隔离")
+        return self
+
+
+class ExecutionProbeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target: ExecutionTarget
+    language: KernelLanguage = "cuda_cpp"
+
+    @model_validator(mode="after")
+    def require_matching_runtime(self) -> ExecutionProbeRequest:
+        if (self.target == "cpu") != (self.language in {"cpp", "python"}):
+            raise ValueError("普通 C++ / Python 使用 CPU 执行位置，GPU 语言使用本地 GPU 或 Colab")
+        return self
 
 
 class JobCreate(BaseModel):
@@ -26,6 +52,7 @@ class JobResponse(BaseModel):
     problem_id: str
     problem_revision: str
     language: KernelLanguage
+    execution_target: ExecutionTarget = "local"
     action: str
     status: str
     phase: str

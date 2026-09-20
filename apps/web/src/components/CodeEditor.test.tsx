@@ -31,4 +31,12 @@ describe('language-aware code editors', () => {
     const { container } = render(<CodeDiff original="// old" modified="// new" language="cuda_cpp" />)
     expect(container.querySelector('.test-diff')).toHaveAttribute('data-editor-language', 'cpp')
   })
+
+  it('uses .cpp and separate Python model paths for CPU implementations', () => {
+    render(<><CodeEditor value="// cpp" language="cpp" problemId="online-softmax" /><CodeEditor value="# python" language="python" problemId="online-softmax" /></>)
+    expect(screen.getByLabelText('C++ 代码编辑器')).toHaveAttribute('data-editor-path', '/problems/online-softmax/cpp/solution.cpp')
+    expect(screen.getByLabelText('C++ 代码编辑器')).toHaveAttribute('data-editor-language', 'cpp')
+    expect(screen.getByLabelText('Python 代码编辑器')).toHaveAttribute('data-editor-path', '/problems/online-softmax/python/solution.py')
+    expect(screen.getByLabelText('Python 代码编辑器')).toHaveAttribute('data-editor-language', 'python')
+  })
 })

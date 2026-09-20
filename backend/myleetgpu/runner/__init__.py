@@ -1,1 +1,1 @@
-"""Isolated CUDA runner adapters."""
+"""Execution ports and independent local Docker / remote Colab adapters."""

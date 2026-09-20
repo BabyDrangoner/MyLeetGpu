@@ -16,7 +16,7 @@ MYLEETGPU_LAN_PORT ?= 3000
 export MYLEETGPU_HOST_DATA_DIR MYLEETGPU_HOST_UID MYLEETGPU_HOST_GID MYLEETGPU_DOCKER_GID
 export MYLEETGPU_LAN_ADDRESS MYLEETGPU_LAN_PORT
 
-.PHONY: help install doctor start start-lan stop stop-lan ps logs lint test test-gpu e2e clean-jobs recover-runner migrate lan-password lan-firewall lan-firewall-off lan-status
+.PHONY: help install doctor start start-lan stop stop-lan ps logs lint test test-gpu test-colab e2e clean-jobs recover-runner migrate lan-password lan-firewall lan-firewall-off lan-status dev-api dev-worker dev-web dev-up dev-status dev-down
 
 help:
 	@echo "MyLeetGpu commands:"
@@ -30,7 +30,12 @@ help:
 	@echo "  make lint        Run backend and frontend static checks"
 	@echo "  make test        Run all non-GPU tests"
 	@echo "  make test-gpu    Run opt-in real NVIDIA GPU acceptance tests"
+	@echo "  make test-colab  Run opt-in real Colab GPU acceptance (existing SSH master required)"
 	@echo "  make e2e         Run browser end-to-end tests"
+	@echo "  make dev-up      Start native API, Worker and Web in the background"
+	@echo "  make dev-status  Check native development service status"
+	@echo "  make dev-down    Stop managed development services (preserve data)"
+	@echo "  make dev-api / dev-worker / dev-web  Run native development services (separate terminals)"
 	@echo "  make clean-jobs  Remove completed temporary job directories"
 	@echo "  make recover-runner  Re-probe GPU and clear the runner circuit breaker"
 	@echo "  make lan-password   Set or rotate LAN Basic Auth credentials"
@@ -74,6 +79,26 @@ ps:
 logs:
 	docker compose logs -f --tail=200
 
+# Native backend processes reuse this user's configured Colab CLI / SSH alias.
+# API and Worker must use the same environment and data directory.
+dev-up:
+	$(VENV)/bin/python scripts/dev_services.py start
+
+dev-status:
+	$(VENV)/bin/python scripts/dev_services.py status
+
+dev-down:
+	$(VENV)/bin/python scripts/dev_services.py stop
+
+dev-api: $(VENV)/bin/python
+	PYTHONPATH=backend $(VENV)/bin/python -m myleetgpu.api.main
+
+dev-worker: $(VENV)/bin/python
+	PYTHONPATH=backend $(VENV)/bin/python -m myleetgpu.worker
+
+dev-web:
+	cd apps/web && $(PNPM) dev
+
 migrate: $(VENV)/bin/python
 	MYLEETGPU_DATA_DIR="$$(pwd)/data" PYTHONPATH=backend $(VENV)/bin/alembic upgrade head
 
@@ -83,11 +108,14 @@ lint: $(VENV)/bin/python
 	cd apps/web && $(PNPM) lint && $(PNPM) typecheck
 
 test: $(VENV)/bin/python
-	PYTHONPATH=backend $(PYTEST) -m "not gpu and not e2e"
+	PYTHONPATH=backend $(PYTEST) -m "not gpu and not colab_gpu and not e2e"
 	cd apps/web && $(PNPM) test
 
 test-gpu: $(VENV)/bin/python
 	MYLEETGPU_RUN_GPU_TESTS=1 PYTHONPATH=backend $(PYTEST) -m gpu -v
+
+test-colab: $(VENV)/bin/python
+	MYLEETGPU_RUN_COLAB_TESTS=1 PYTHONPATH=backend $(PYTEST) tests/gpu/test_real_colab_runner.py -v
 
 e2e:
 	cd apps/web && $(PNPM) e2e

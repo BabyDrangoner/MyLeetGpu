@@ -5,9 +5,9 @@ import { api } from '../api/client'
 import { RetryButton, StatusView } from '../components/StatusView'
 import { useAsync } from '../hooks/useAsync'
 import { difficultyLabel } from '../lib/format'
-import { languageMetadata } from '../lib/languages'
+import { isCpuLanguage, isKernelProblemLanguage, languageMetadata } from '../lib/languages'
 
-type ProblemCategory = 'all' | 'kernel' | 'torch'
+type ProblemCategory = 'all' | 'kernel' | 'torch' | 'cpu'
 
 const difficultyClass = (difficulty: string) => {
   if (difficulty.includes('困难') || difficulty === 'hard') return 'hard'
@@ -23,15 +23,16 @@ export function ProblemListPage() {
 
   const categories: { value: ProblemCategory; label: string; count: number }[] = [
     { value: 'all', label: '全部题目', count: problems?.length ?? 0 },
-    { value: 'kernel', label: '算子题', count: problems?.filter((problem) => problem.languages?.some((language) => language !== 'torch_python')).length ?? 0 },
+    { value: 'kernel', label: '算子题', count: problems?.filter((problem) => problem.languages?.some(isKernelProblemLanguage)).length ?? 0 },
     { value: 'torch', label: 'PyTorch 题', count: problems?.filter((problem) => problem.languages?.includes('torch_python')).length ?? 0 },
+    { value: 'cpu', label: 'CPU 算法题', count: problems?.filter((problem) => problem.languages?.some(isCpuLanguage)).length ?? 0 },
   ]
   const filtered = useMemo(() => (problems ?? []).filter((problem) => {
     const matchesQuery = `${problem.title} ${problem.slug} ${problem.summary}`.toLowerCase().includes(query.trim().toLowerCase())
     const matchesDifficulty = difficulty === '全部' || difficultyLabel(problem.difficulty) === difficulty
     const matchesCategory = category === 'all' || (category === 'torch'
       ? problem.languages?.includes('torch_python')
-      : problem.languages?.some((language) => language !== 'torch_python'))
+      : problem.languages?.some(category === 'cpu' ? isCpuLanguage : isKernelProblemLanguage))
     return matchesQuery && matchesDifficulty && matchesCategory
   }), [problems, query, difficulty, category])
 

@@ -12,6 +12,8 @@ from myleetgpu.infrastructure.models import (
     BenchmarkRunRecord,
     DraftRecord,
     EnvironmentSnapshotRecord,
+    ExecutionProbeRecord,
+    ExecutionSettingsRecord,
     JobRecord,
     ResourceLeaseRecord,
     VersionRecord,
@@ -25,6 +27,105 @@ _UNSET = object()
 class Repository:
     def __init__(self, session_factory: sessionmaker[Session]):
         self.session_factory = session_factory
+
+    def active_spool_paths(self) -> list[str]:
+        """Return paths still owned by jobs without exposing a database session."""
+        with self.session_factory() as session:
+            return list(
+                session.scalars(
+                    select(JobRecord.spool_path).where(JobRecord.spool_path.is_not(None))
+                )
+            )
+
+    def execution_settings(self) -> dict[str, Any]:
+        with self.session_factory() as session:
+            row = session.get(ExecutionSettingsRecord, "default")
+            return {
+                "target": row.target if row else "local",
+                "colab_acknowledged": row.colab_acknowledged if row else False,
+                "updated_at": row.updated_at if row else None,
+            }
+
+    def update_execution_settings(self, target: str, colab_acknowledged: bool) -> None:
+        if target not in {"local", "colab"} or (target == "colab" and not colab_acknowledged):
+            raise ValueError(
+                "Colab execution requires acknowledgement of the trusted-code boundary"
+            )
+        with self.session_factory.begin() as session:
+            statement = insert(ExecutionSettingsRecord).values(
+                id="default",
+                target=target,
+                colab_acknowledged=colab_acknowledged,
+                updated_at=utc_now(),
+            )
+            session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=[ExecutionSettingsRecord.id],
+                    set_={
+                        "target": target,
+                        "colab_acknowledged": colab_acknowledged,
+                        "updated_at": utc_now(),
+                    },
+                )
+            )
+
+    def enqueue_execution_probe(self, target: str, language: str, timeout: float) -> str:
+        with self.session_factory.begin() as session:
+            now = utc_now()
+            session.execute(
+                delete(ExecutionProbeRecord).where(
+                    ExecutionProbeRecord.expires_at < now - timedelta(minutes=10)
+                )
+            )
+            record = ExecutionProbeRecord(
+                target=target, language=language, expires_at=now + timedelta(seconds=timeout)
+            )
+            session.add(record)
+            session.flush()
+            return record.id
+
+    def claim_execution_probe(self) -> ExecutionProbeRecord | None:
+        candidate = (
+            select(ExecutionProbeRecord.id)
+            .where(
+                ExecutionProbeRecord.status == "queued", ExecutionProbeRecord.expires_at > utc_now()
+            )
+            .order_by(ExecutionProbeRecord.created_at)
+            .limit(1)
+            .scalar_subquery()
+        )
+        with self.session_factory.begin() as session:
+            claimed = session.scalar(
+                update(ExecutionProbeRecord)
+                .where(
+                    ExecutionProbeRecord.id == candidate, ExecutionProbeRecord.status == "queued"
+                )
+                .values(status="running")
+                .returning(ExecutionProbeRecord.id)
+            )
+            return session.get(ExecutionProbeRecord, claimed) if claimed else None
+
+    def execution_probe(self, probe_id: str) -> ExecutionProbeRecord | None:
+        with self.session_factory() as session:
+            return session.get(ExecutionProbeRecord, probe_id)
+
+    def complete_execution_probe(self, probe_id: str, result: dict[str, Any]) -> None:
+        with self.session_factory.begin() as session:
+            session.execute(
+                update(ExecutionProbeRecord)
+                .where(
+                    ExecutionProbeRecord.id == probe_id, ExecutionProbeRecord.status == "running"
+                )
+                .values(status="completed", result_json=result)
+            )
+
+    def cancel_execution_probe(self, probe_id: str) -> None:
+        with self.session_factory.begin() as session:
+            session.execute(
+                update(ExecutionProbeRecord)
+                .where(ExecutionProbeRecord.id == probe_id, ExecutionProbeRecord.status == "queued")
+                .values(status="cancelled")
+            )
 
     def get_draft(self, problem_id: str, language: str = "cuda_cpp") -> DraftRecord | None:
         with self.session_factory() as session:
@@ -280,11 +381,21 @@ class Repository:
             session.flush()
             return record
 
-    def latest_environment(self, backend: str | None = None) -> EnvironmentSnapshotRecord | None:
+    def latest_environment(
+        self, backend: str | None = None, *, execution_target: str | None = None
+    ) -> EnvironmentSnapshotRecord | None:
         with self.session_factory() as session:
             statement = select(EnvironmentSnapshotRecord)
             if backend is not None:
                 statement = statement.where(EnvironmentSnapshotRecord.backend == backend)
+            if execution_target is not None:
+                statement = statement.where(
+                    func.coalesce(
+                        EnvironmentSnapshotRecord.toolchain_json["execution_target"].as_string(),
+                        "local",
+                    )
+                    == execution_target
+                )
             return session.scalar(
                 statement.order_by(
                     EnvironmentSnapshotRecord.observed_at.desc(),

@@ -1,5 +1,12 @@
 import type { Page, Route } from '@playwright/test'
 
+interface ExecutionSettings {
+  target: 'local' | 'colab'
+  colab_acknowledged: boolean
+  colab: { ssh_host: string; remote_root: string; isolation: 'trusted-native' }
+  updated_at: string | null
+}
+
 export const starterSource = `#include <cuda_runtime.h>
 
 __global__ void solve_kernel(const float* a, const float* b, float* output, int n) {
@@ -189,6 +196,8 @@ export interface MockApiState {
   versions: ReturnType<typeof savedVersion>[]
   submittedJobs: Array<Record<string, unknown>>
   deleteConfirmed: boolean
+  executionSettings: ExecutionSettings
+  probes: Array<{ target: string; language: string }>
 }
 
 export async function installMockApi(page: Page, options: { versions?: boolean; comparable?: boolean; tritonVersion?: boolean; torchVersions?: boolean } = {}) {
@@ -202,6 +211,8 @@ export async function installMockApi(page: Page, options: { versions?: boolean; 
     versions: initialVersions,
     submittedJobs: [],
     deleteConfirmed: false,
+    executionSettings: { target: 'local', colab_acknowledged: false, colab: { ssh_host: 'colab-vscode', remote_root: '/content/project/myleetgpu-runner', isolation: 'trusted-native' }, updated_at: null },
+    probes: [],
   }
   const jobs = new Map<string, Record<string, unknown>>()
   const drafts = new Map<string, string>()
@@ -213,7 +224,19 @@ export async function installMockApi(page: Page, options: { versions?: boolean; 
     const method = request.method()
     const fulfill = (payload: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: payload === undefined ? '' : JSON.stringify(payload) })
 
-    if (path === '/api/environment' && method === 'GET') return fulfill({ ...environment, backend: url.searchParams.get('language') ?? 'cuda_cpp' })
+    if (path === '/api/execution-settings' && method === 'GET') return fulfill(state.executionSettings)
+    if (path === '/api/execution-settings' && method === 'PUT') {
+      const body = request.postDataJSON() as Pick<ExecutionSettings, 'target' | 'colab_acknowledged'>
+      if (body.target === 'colab' && !body.colab_acknowledged) return fulfill({ detail: '必须确认 Colab 可信代码边界' }, 422)
+      state.executionSettings = { ...state.executionSettings, ...body, updated_at: new Date().toISOString() }
+      return fulfill(state.executionSettings)
+    }
+    if (path === '/api/execution-settings/probe' && method === 'POST') {
+      const body = request.postDataJSON() as { target: string; language: string }
+      state.probes.push(body)
+      return fulfill({ ...environment, backend: body.language, execution_target: body.target, gpu_name: body.target === 'colab' ? 'Tesla T4 (Colab)' : environment.gpu_name })
+    }
+    if (path === '/api/environment' && method === 'GET') return fulfill({ ...environment, backend: url.searchParams.get('language') ?? 'cuda_cpp', execution_target: state.executionSettings.target, gpu_name: state.executionSettings.target === 'colab' ? 'Tesla T4 (Colab)' : environment.gpu_name })
     if (path === '/api/problems' && method === 'GET') return fulfill({ items: problems, total: problems.length })
     if (path.startsWith('/api/problems/') && path.endsWith('/versions') && method === 'GET') return fulfill({ items: state.versions, total: state.versions.length })
     if (path.startsWith('/api/problems/') && method === 'GET') return fulfill(problemDetail(decodeURIComponent(path.split('/').at(-1) ?? '')))
@@ -273,13 +296,13 @@ export async function installMockApi(page: Page, options: { versions?: boolean; 
       const body = request.postDataJSON() as Record<string, unknown>
       state.submittedJobs.push(body)
       const id = `job-${state.submittedJobs.length}`
-      jobs.set(id, body)
-      return fulfill({ id, problem_id: body.problem_id, language: body.language, action: body.action, status: 'queued', phase: 'queued', progress: 0 })
+      jobs.set(id, { ...body, execution_target: state.executionSettings.target })
+      return fulfill({ id, problem_id: body.problem_id, language: body.language, execution_target: state.executionSettings.target, action: body.action, status: 'queued', phase: 'queued', progress: 0 })
     }
     if (path.startsWith('/api/jobs/') && method === 'GET') {
       const id = path.split('/').at(-1) ?? ''
       const body = jobs.get(id) ?? {}
-      const base = { id, problem_id: 'vector-addition', language: body.language, action: body.action, progress: 1 }
+      const base = { id, problem_id: 'vector-addition', language: body.language, action: body.action, execution_target: body.execution_target, progress: 1 }
       if (body.action === 'compile') {
         const language = body.language as MockLanguage
         const message = language === 'triton_python' ? 'Triton 编译检查失败' : language === 'torch_python' ? 'PyTorch 代码检查失败' : 'NVCC 编译失败'

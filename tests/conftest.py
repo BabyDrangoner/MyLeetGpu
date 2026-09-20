@@ -23,5 +23,5 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         reason="set MYLEETGPU_RUN_GPU_TESTS=1 to run real Docker/NVIDIA acceptance tests"
     )
     for item in items:
-        if "gpu" in item.keywords:
+        if item.get_closest_marker("gpu") is not None:
             item.add_marker(skip_gpu)

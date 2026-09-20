@@ -6,6 +6,7 @@ import { api } from '../api/client'
 import { ToastProvider } from '../components/Toast'
 import type { Job, ProblemDetail } from '../domain/types'
 import { readLocalDraft } from '../lib/drafts'
+import { ExecutionSettingsProvider } from '../hooks/useExecutionSettings'
 import { WorkspacePage } from './WorkspacePage'
 
 vi.mock('../api/client', () => ({
@@ -14,6 +15,7 @@ vi.mock('../api/client', () => ({
     drafts: { get: vi.fn(), save: vi.fn() },
     versions: { list: vi.fn(), findDuplicates: vi.fn() },
     jobs: { create: vi.fn(), get: vi.fn() },
+    executionSettings: { get: vi.fn() },
   },
 }))
 
@@ -112,6 +114,30 @@ describe('WorkspacePage language sessions', () => {
     expect(api.drafts.save).toHaveBeenCalledWith('vector-addition', 'torch_python', '# torch edited')
   })
 
+  it('flushes the latest draft immediately on unmount before autosave runs', async () => {
+    const view = renderWorkspace()
+    const editor = await screen.findByLabelText('cuda_cpp editor')
+    await waitFor(() => expect(editor).not.toHaveAttribute('readonly'))
+    fireEvent.change(editor, { target: { value: '// navigation draft' } })
+    view.unmount()
+    expect(readLocalDraft('vector-addition', 'cuda_cpp')?.source).toBe('// navigation draft')
+    renderWorkspace()
+    await waitFor(() => expect(screen.getByLabelText('cuda_cpp editor')).toHaveValue('// navigation draft'))
+  })
+
+  it('flushes the current language draft when the browser hides the page', async () => {
+    const user = userEvent.setup()
+    renderWorkspace()
+    await waitFor(() => expect(screen.getByLabelText('cuda_cpp editor')).not.toHaveAttribute('readonly'))
+    await user.click(screen.getByRole('button', { name: 'Triton (Python)' }))
+    const editor = await screen.findByLabelText('triton_python editor')
+    await waitFor(() => expect(editor).not.toHaveAttribute('readonly'))
+    fireEvent.change(editor, { target: { value: '# tab close draft' } })
+    fireEvent(window, new Event('pagehide'))
+    expect(readLocalDraft('vector-addition', 'triton_python')?.source).toBe('# tab close draft')
+    expect(readLocalDraft('vector-addition', 'cuda_cpp')?.source).toBe('// cuda starter')
+  })
+
   it('opens a torch-only problem on PyTorch even when the URL requests CUDA', async () => {
     vi.mocked(api.problems.get).mockResolvedValue({
       ...problem,
@@ -140,6 +166,43 @@ describe('WorkspacePage language sessions', () => {
     expect(screen.getByRole('button', { name: 'PyTorch (Python)' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'CUDA C++' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '代码检查' })).toBeInTheDocument()
+  })
+
+  it('runs CPU C++ and Python without Colab acknowledgement and keeps independent drafts', async () => {
+    const user = userEvent.setup()
+    vi.mocked(api.executionSettings.get).mockResolvedValue({ target: 'colab', colab_acknowledged: false, colab: { ssh_host: 'colab-vscode', remote_root: '/content/project', isolation: 'trusted-native' }, updated_at: null })
+    vi.mocked(api.problems.get).mockResolvedValue({
+      ...problem, slug: 'online-softmax', title: 'Online Softmax', default_language: 'cpp', language: 'cpp', starter_code: '// cpu starter',
+      implementations: {
+        cpp: { language: 'cpp', display_name: 'C++', file_extension: '.cpp', editor_language: 'cpp', starter_code: '// cpu starter' },
+        python: { language: 'python', display_name: 'Python', file_extension: '.py', editor_language: 'python', starter_code: '# python starter' },
+      },
+    })
+    vi.mocked(api.jobs.create).mockImplementation(async (input) => ({ id: 'cpu-job', language: input.language, action: input.action, status: 'succeeded', execution_target: 'cpu' }))
+    render(<MemoryRouter initialEntries={['/problems/online-softmax']}><ExecutionSettingsProvider><ToastProvider><Routes><Route path="/problems/:slug" element={<WorkspacePage />} /></Routes></ToastProvider></ExecutionSettingsProvider></MemoryRouter>)
+
+    const cppEditor = await screen.findByLabelText('cpp editor')
+    await waitFor(() => expect(cppEditor).not.toHaveAttribute('readonly'))
+    expect(screen.getByText('solution.cpp')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '执行：本地 CPU' })).toHaveAttribute('href', '/environment?language=cpp')
+    expect(screen.getByText(/不使用安全沙箱/)).toBeInTheDocument()
+    fireEvent.change(cppEditor, { target: { value: '// cpp changed' } })
+    await user.click(screen.getByRole('button', { name: '运行样例' }))
+    await waitFor(() => expect(api.jobs.create).toHaveBeenCalledWith(expect.objectContaining({ language: 'cpp', source: '// cpp changed', action: 'run' })))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Python' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Python' }))
+    const pythonEditor = await screen.findByLabelText('python editor')
+    await waitFor(() => expect(pythonEditor).not.toHaveAttribute('readonly'))
+    expect(pythonEditor).toHaveValue('# python starter')
+    expect(screen.getByRole('button', { name: '代码检查' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '运行样例' }))
+    await waitFor(() => expect(api.jobs.create).toHaveBeenLastCalledWith(expect.objectContaining({ language: 'python', action: 'run' })))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'C++' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'C++' }))
+    await waitFor(() => expect(screen.getByLabelText('cpp editor')).toHaveValue('// cpp changed'))
+    await user.click(screen.getByRole('button', { name: '测量协议' }))
+    expect(screen.getByText(/CPU 单调时钟采样/)).toBeInTheDocument()
+    expect(screen.queryByText(/设备事件采样/)).not.toBeInTheDocument()
   })
 
   it('toggles a focused editor layout without losing source or the selected statement view', async () => {

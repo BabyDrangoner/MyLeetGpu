@@ -68,6 +68,23 @@ describe('API contract adapter', () => {
     expect(problem.implementations.cuda_cpp).toBeUndefined()
   })
 
+  it('keeps ordinary CPU C++ and Python implementations separate from GPU languages', async () => {
+    fetchMock.mockResolvedValue(json({
+      slug: 'online-softmax', title: 'Online Softmax', default_language: 'cpp',
+      implementations: {
+        cpp: { starter_code: '// cpp', source_suffix: '.cpp', signature: { declaration: 'void solve()' } },
+        python: { starter_code: '# python', source_suffix: '.py' },
+      },
+    }))
+
+    const problem = await api.problems.get('online-softmax')
+    expect(problem.default_language).toBe('cpp')
+    expect(problem.languages).toEqual(['cpp', 'python'])
+    expect(problem.implementations.cpp).toMatchObject({ display_name: 'C++', editor_language: 'cpp', file_extension: '.cpp', signature: 'void solve()' })
+    expect(problem.implementations.python).toMatchObject({ display_name: 'Python', editor_language: 'python', file_extension: '.py' })
+    expect(problem.implementations.cuda_cpp).toBeUndefined()
+  })
+
   it('normalizes jobs, environment snapshots and backend UTC timestamps', async () => {
     fetchMock
       .mockResolvedValueOnce(json({

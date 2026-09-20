@@ -38,6 +38,9 @@ class FakeRunner:
     def assign_owner(self, owner: str) -> None:
         self.owner = owner
 
+    def cleanup_orphan_containers(self) -> list[str]:
+        return []
+
     def cleanup_owned_containers(self) -> list[str]:
         self.cleaned_owned_containers = True
         return ["owned-container"]

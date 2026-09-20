@@ -99,7 +99,14 @@ class JobService:
             if source is not None:
                 stored_hash = submitted_hash
                 self._write_snapshot(spool_dir / f"source{implementation.source_suffix}", source)
-            payload: dict[str, Any] = {}
+            execution = self.repository.execution_settings()
+            target = "cpu" if implementation.language.is_cpu else execution["target"]
+            if target == "colab" and not execution["colab_acknowledged"]:
+                raise JobSubmissionError("请先确认 Colab 可信代码执行边界")
+            payload: dict[str, Any] = {
+                "execution_target": target,
+                "colab_acknowledged": target == "colab" and execution["colab_acknowledged"],
+            }
             if normalized_name is not None:
                 payload["version_name"] = normalized_name
                 payload["notes"] = notes
@@ -125,13 +132,8 @@ class JobService:
             raise
 
     def cleanup_stale_spool(self) -> list[str]:
-        active = set()
         # Jobs are retained as metadata; only records with an active spool path protect a directory.
-        with self.repository.session_factory() as session:
-            rows = (
-                session.query(JobRecord.spool_path).filter(JobRecord.spool_path.is_not(None)).all()
-            )
-            active = {Path(path).resolve() for (path,) in rows if path}
+        active = {Path(path).resolve() for path in self.repository.active_spool_paths()}
         removed: list[str] = []
         root = self.settings.jobs_dir.resolve()
         if not root.exists():
