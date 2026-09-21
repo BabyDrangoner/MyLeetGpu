@@ -4,6 +4,34 @@ MyLeetGpu 是一个面向单机可信操作者的 GPU/CPU 编程、正确性验�
 
 > 安全边界：默认只发布到 `127.0.0.1`。可选的 `make start-lan` 仅供受信任的家庭/实验室局域网使用，要求 Basic Auth，并将防火墙范围限制为本地子网。它不是多用户权限系统；消费级 GPU 与 Docker 不提供公网多租户所需的强 GPU/显存隔离。严禁公网、路由器端口转发或公共 Wi-Fi 暴露。
 
+## 功能预览
+
+以下截图来自本机运行的真实服务，展示浏览器窄栏布局。
+
+### 多类型题库
+
+统一浏览 CUDA/Triton 算子、PyTorch Attention 与 CPU 算法题，支持搜索、题型和难度筛选。
+
+![题库：算子题、PyTorch 题与 CPU 算法题](docs/screenshots/problem-library.jpg)
+
+### 编程与验证
+
+在工作台切换实现语言、调整面板布局，并完成编译、运行和完整验证；不同语言的草稿分别保存。
+
+![专注编码工作台：语言切换、代码编辑与真实验证结果](docs/screenshots/coding-workspace.jpg)
+
+### 性能版本比较
+
+保存代码与测量快照，在相同语言、相同环境下比较逐规模耗时和波动。图中是同一公开 Python 基线的两次真实测量，仅展示比较功能与测量波动，不代表优化收益。
+
+![性能版本：同一 Python 基线两次真实测量的比较](docs/screenshots/performance-versions.jpg)
+
+### CPU 运行环境
+
+查看本机 CPU、工具链和环境指纹。普通 C++/Python 题不依赖 GPU 或 Colab；原生执行仅适合可信代码，并非安全沙箱。
+
+![CPU 运行环境：环境就绪状态与可信执行边界](docs/screenshots/cpu-environment.jpg)
+
 ## Quick Start
 
 前置条件：WSL2、Windows NVIDIA 驱动、Docker Desktop（启用当前 WSL 发行版集成）和 NVIDIA Container Toolkit。仅运行 Compose 不需要宿主 Node/NVCC；开发测试需要 Python 3.12+ 与 Node.js 20+。
